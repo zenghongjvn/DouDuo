@@ -66,7 +66,7 @@ jobs:
           shot 00-home
           APP=build/DD/Build/Products/Debug-iphonesimulator/DouDuo.app
           xcrun simctl install "$UDID" "$APP"
-          BID=me.rrmm.douduo
+          BID=com.zenghongjvn.douduo
           echo "--- 正常启动（推荐流，不登录）"
           xcrun simctl launch "$UDID" $BID; sleep 40
           shot 10-feed

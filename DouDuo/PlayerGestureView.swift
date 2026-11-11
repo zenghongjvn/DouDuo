@@ -1,10 +1,10 @@
 import SwiftUI
 import UIKit
 
-// MARK: - UIKit 手势宿主：Pan 起手定方向（横=快进/竖=漏给 ScrollView 切视频）+ 单击/双击/长按
+// MARK: - UIKit 手势宿主：Pan 起手定方向（短视频横向导航/影库横向快进，竖向漏给 ScrollView）+ 单击/双击/长按
 // 纯 SwiftUI 的 .gesture/.simultaneousGesture 会吞掉整段手势序列导致竖滑分页失效；
 // 下沉 UIKit 用一个 UIPanGestureRecognizer，在 shouldBegin 里按起手速度方向仲裁：
-//   · 横向主导 → 本次手势归 seek（我们接管）
+//   · 横向主导 → 本次手势归导航或 seek（由调用方选择）
 //   · 纵向主导 → return false，手势漏给外层 ScrollView 分页切视频
 // 起手那一帧定轴，整段锁死，中途不改（=你说的"一发力就定方向"）。
 struct PlayerGestureView: UIViewRepresentable {
@@ -20,8 +20,10 @@ struct PlayerGestureView: UIViewRepresentable {
     var onSeekEnded: () -> Void
     var onEdgeChanged: (CGFloat) -> Void = { _ in }        // 左缘右滑过程中：位移跟手
     var onEdgeEnded: (CGFloat, CGFloat, CGFloat) -> Void = { _, _, _ in }  // 松手：(位移, 横向速度, 屏宽)
-    /// 竖向优先（抖音短视频：上下滑切视频是主操作，只有明显横向才算快进）；影库保持横向偏置
+    /// 竖向优先（抖音短视频：上下滑切视频是主操作，只有明显横向才接管导航）；影库保持横向偏置
     var verticalFirst = false
+    /// When provided, a horizontal gesture navigates once on release and never seeks.
+    var onHorizontalSwipe: ((Bool) -> Void)? = nil // true = left
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -129,6 +131,15 @@ struct PlayerGestureView: UIViewRepresentable {
 
         @objc func handlePan(_ g: UIPanGestureRecognizer) {
             guard let v = view else { return }
+            if let navigate = parent.onHorizontalSwipe {
+                guard g.state == .ended else { return }
+                let dx = g.translation(in: v).x
+                let velocity = g.velocity(in: v).x
+                guard abs(dx) >= max(40, v.bounds.width * 0.12)
+                    || (abs(dx) > 20 && abs(velocity) > 650) else { return }
+                navigate(dx < 0)
+                return
+            }
             switch g.state {
             case .began: parent.onSeekBegan()
             case .changed: parent.onSeekChanged(g.translation(in: v).x, v.bounds.width)
@@ -141,7 +152,7 @@ struct PlayerGestureView: UIViewRepresentable {
         // 否则都判为快进，避免快进时带点下滑分量被误识别成切视频。
 
         func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
-            if g is UIScreenEdgePanGestureRecognizer { return true }   // 边缘退出始终允许
+            if g is UIScreenEdgePanGestureRecognizer { return parent.onHorizontalSwipe == nil }
             guard let pg = g as? UIPanGestureRecognizer, let v = view else { return true }
             // 长按（2 倍速）期间不触发快进
             if let l = long, l.state == .began || l.state == .changed { return false }
@@ -154,7 +165,7 @@ struct PlayerGestureView: UIViewRepresentable {
             if abs(d.x) < 1, abs(d.y) < 1 { d = pg.translation(in: v) }
             if abs(d.x) < 0.5, abs(d.y) < 0.5 { return false }
             if parent.verticalFirst {
-                // 横向要比竖向大 20% 才算快进，其余一律交给分页切视频
+                // 横向要比竖向大 20% 才接管，其余一律交给分页切视频
                 return abs(d.x) > abs(d.y) * 1.2
             }
             // 竖向速度要比横向大 50% 以上才算"切视频"，否则一律快进（横向偏置，抗误判）
@@ -165,7 +176,7 @@ struct PlayerGestureView: UIViewRepresentable {
         // Pan 被拒绝（竖向）→ 返回 true 让 ScrollView 接管分页
         func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
             if let pg = pan, pg.state == .began || pg.state == .changed {
-                return false   // 正在拖进度，独占
+                return false   // 横向导航/拖进度，独占
             }
             return true        // Pan 还没开始或已结束，让 ScrollView 自由分页
         }

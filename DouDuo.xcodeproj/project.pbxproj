@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E011DD890000000000000002 /* DYNavigationDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = E011DD890000000000000001 /* DYNavigationDock.swift */; };
 		0A1C42DF0EF2C77EABF5F7F0 /* DouyinMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 016E32A4CC2CC36574CF1639 /* DouyinMessages.swift */; };
 		0C79A7F48133EC2BB889BB94 /* DouDuoUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6754C7BC29DD87FCABDB757 /* DouDuoUITests.swift */; };
 		10144843E364788B2D3A07C6 /* DouyinEmojiStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEB305D03FD029B1282B94AB /* DouyinEmojiStore.swift */; };
@@ -51,6 +52,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		E011DD890000000000000001 /* DYNavigationDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DYNavigationDock.swift; sourceTree = "<group>"; };
 		001C015957CC2755309F4EE5 /* DouyinPeopleCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DouyinPeopleCache.swift; sourceTree = "<group>"; };
 		008B7FB68E974359DCF77E02 /* DouyinVideoCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DouyinVideoCache.swift; sourceTree = "<group>"; };
 		016E32A4CC2CC36574CF1639 /* DouyinMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DouyinMessages.swift; sourceTree = "<group>"; };
@@ -125,6 +127,7 @@
 				008B7FB68E974359DCF77E02 /* DouyinVideoCache.swift */,
 				D5AFA52547E516238F34D3A7 /* DouyinWebView.swift */,
 				8692ACA58496924A8020F3F1 /* DYMessageNavigation.swift */,
+				E011DD890000000000000001 /* DYNavigationDock.swift */,
 				FB43F1FB3E9969E7DCF9C01A /* FollowLiveLogic.swift */,
 				BC6C461FDA2AC796478F78BD /* Info.plist */,
 				67D760242AE376C515972D58 /* PlayerGestureView.swift */,
@@ -280,6 +283,7 @@
 			files = (
 				48F46B135907F902C9B20475 /* CachedAsyncImage.swift in Sources */,
 				DC990FC343EDD6CE18CCCB91 /* DYMessageNavigation.swift in Sources */,
+				E011DD890000000000000002 /* DYNavigationDock.swift in Sources */,
 				844D4A4311515599F9DF42DE /* DouDuoApp.swift in Sources */,
 				28289ABD1DCF4363BEB6CB68 /* DouyinApiScanner.swift in Sources */,
 				47623E6242FA5EC16A23DB92 /* DouyinBridge+More.swift in Sources */,
@@ -340,7 +344,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = me.rrmm.douduo;
+				PRODUCT_BUNDLE_IDENTIFIER = com.zenghongjvn.douduo;
 				PRODUCT_NAME = DouDuo;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1";
@@ -367,7 +371,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = me.rrmm.douduo;
+				PRODUCT_BUNDLE_IDENTIFIER = com.zenghongjvn.douduo;
 				PRODUCT_NAME = DouDuo;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1";
@@ -384,7 +388,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = me.rrmm.douduo.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.zenghongjvn.douduo.uitests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1";
 				TEST_TARGET_NAME = DouDuo;
@@ -425,7 +429,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 88;
+				CURRENT_PROJECT_VERSION = 89;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = "";
 				ENABLE_NS_ASSERTIONS = NO;
@@ -460,7 +464,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = me.rrmm.douduo.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.zenghongjvn.douduo.uitests;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1";
 				TEST_TARGET_NAME = DouDuo;
@@ -501,7 +505,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 88;
+				CURRENT_PROJECT_VERSION = 89;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

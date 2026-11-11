@@ -1,6 +1,6 @@
 // 消息中心（对齐抖音消息页）：顶部朋友头像 → 互动/粉丝/系统/私信入口 → 点进分类二级页。
 // 全部内容在同一个 ScrollView 里滚动，分类入口不固定在顶部。
-// Duo：返回键走系统 toolbar（自动进右侧竖向侧栏）；根页左缘右滑关闭，二级页系统原生左缘返回上一层。
+// Duo：根页通过 Dock 切换栏目；详情返回走系统 toolbar 或左缘手势。
 import SwiftUI
 import WebKit
 import CryptoKit
@@ -336,7 +336,6 @@ private struct DYChatPaneBoundsKey: PreferenceKey {
 
 struct DYMessagesScreen: View {
     let bridge: DouyinBridge
-    let onClose: () -> Void
     let onWeb: (URL) -> Void
 
     @State private var navigation = DYMessageNavigation()
@@ -364,14 +363,17 @@ struct DYMessagesScreen: View {
     var body: some View {
         NavigationStack {
             messageContent
+                .modifier(DYDockToolbar(tab: .messages))
                 .navigationTitle(sidebarVisible ? "" : "消息")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    // Duo：返回/关闭走系统 cancellationAction，系统把它放进右侧竖向侧栏
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("返回", systemImage: "chevron.backward", action: backFromMessage)
-                            .disabled(openingChat != nil || restoringList)
-                            .accessibilityIdentifier("douyin.messages.back")
+                    // The message center is a root tab. Only its detail pages go back.
+                    if navigation.hasDetail {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("返回", systemImage: "chevron.backward", action: backFromMessage)
+                                .disabled(openingChat != nil || restoringList)
+                                .accessibilityIdentifier("douyin.messages.back")
+                        }
                     }
                 }
 
@@ -655,9 +657,9 @@ struct DYMessagesScreen: View {
     }
 
     private func backFromMessage() {
-        guard openingChat == nil, !restoringList else { return }
+        guard navigation.hasDetail, openingChat == nil, !restoringList else { return }
         let wasChat = navigation.isChat
-        if navigation.back() { onClose(); return }
+        if navigation.back() { return }
         guard wasChat else { return }
         restoreConversationList()
     }

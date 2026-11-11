@@ -14,21 +14,35 @@ trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/Payload"
 ditto build/ReleaseDerivedData/Build/Products/Release-iphoneos/DouDuo.app "$stage/Payload/DouDuo.app"
 python3 - "$stage" <<'PY'
-import pathlib, plistlib, shutil, sys
+import pathlib, plistlib, shutil, subprocess, sys
 stage = pathlib.Path(sys.argv[1])
 app = stage / 'Payload/DouDuo.app'
 with (app / 'Info.plist').open('rb') as f:
     info = plistlib.load(f)
 assert info['CFBundleShortVersionString'] == '1.3.11', info
-assert info['CFBundleVersion'] == '88', info
+assert info['CFBundleVersion'] == '89', info
+assert info['CFBundleIdentifier'] == 'com.zenghongjvn.douduo', info
 assert info['MinimumOSVersion'] == '27.1', info
 assert info['UIDeviceFamily'] == [1], info
+# CODE_SIGNING_ALLOWED=NO skips Xcode's normal framework architecture thinning.
+# This app only targets arm64 iPhones; retain the exact upstream arm64 VLC slice.
+for framework in (app / 'Frameworks').glob('*.framework'):
+    binary = framework / framework.stem
+    if not binary.is_file():
+        continue
+    archs = subprocess.check_output(['xcrun', 'lipo', '-archs', str(binary)], text=True).split()
+    assert 'arm64' in archs, (binary, archs)
+    if archs != ['arm64']:
+        thin = binary.with_suffix('.arm64')
+        subprocess.run(['xcrun', 'lipo', str(binary), '-thin', 'arm64', '-output', str(thin)], check=True)
+        thin.replace(binary)
+    assert subprocess.check_output(['xcrun', 'lipo', '-archs', str(binary)], text=True).strip() == 'arm64'
 for signature in app.rglob('_CodeSignature'):
     shutil.rmtree(signature)
 for profile in app.rglob('embedded.mobileprovision'):
     profile.unlink()
 PY
-artifact="$PWD/output/DouDuo-1.3.11-build88-Duo-unsigned.ipa"
+artifact="$PWD/output/DouDuo-1.3.11-build89-Duo-unsigned.ipa"
 (cd "$stage" && /usr/bin/ditto -c -k --norsrc --keepParent Payload "$artifact")
 unzip -tq "$artifact"
 (cd output && shasum -a 256 "$(basename "$artifact")" > "$(basename "$artifact").sha256")

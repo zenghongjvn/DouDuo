@@ -1157,8 +1157,6 @@ struct DYMineScreen: View {
     let onLogin: () -> Void
     let onAuthor: (DYAweme) -> Void
     var onMessages: (() -> Void)? = nil
-    var onClose: (() -> Void)? = nil
-    @Environment(\.dismiss) private var dismiss
     @State private var user: DYUser?
     @State private var userErr: String?
     @State private var kind: DYListKind = .post
@@ -1169,21 +1167,16 @@ struct DYMineScreen: View {
     var body: some View {
         NavigationStack {
             content
+                .modifier(DYDockToolbar(tab: .mine))
                 .navigationTitle(user?.name ?? "我的")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    // Duo：返回 + 操作走系统 toolbar，系统放进右侧竖向侧栏（每项都有标题+符号）
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("返回", systemImage: "chevron.backward") { if let onClose { onClose() } else { dismiss() } }
-                            .accessibilityIdentifier("douyin.mine.back")
-                    }
                     ToolbarItem(placement: .primaryAction) {
                         Button("网页版 / 登录", systemImage: "safari") { onLogin() }
                     }
                 }
         }
         .preferredColorScheme(.dark)
-        .modifier(DYEdgeSwipeBack(action: { if let onClose { onClose() } else { dismiss() } }))
     }
 
     private var content: some View {
@@ -1318,6 +1311,7 @@ struct DYAuthorScreen: View {
     let bridge: DouyinBridge
     let author: DYAweme.Author
     let onWeb: (URL) -> Void
+    var onClose: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var user: DYUser?
     @State private var err: String?
@@ -1335,7 +1329,7 @@ struct DYAuthorScreen: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Button { dismiss() } label: {
+                Button { close() } label: {
                     Image(systemName: "chevron.left").font(.headline.weight(.semibold)).foregroundStyle(.white)
                         .frame(width: 40, height: 40)
                 }
@@ -1352,7 +1346,7 @@ struct DYAuthorScreen: View {
             }
             if let s = author.secUid, let u = URL(string: "https://www.douyin.com/user/\(s)") {
                 Button {
-                    dismiss()
+                    close()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onWeb(u) }
                 } label: {
                     Text("网页版")
@@ -1373,7 +1367,9 @@ struct DYAuthorScreen: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
-        .background(Color.black.ignoresSafeArea())
+        .background(Color.black)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("douyin.author.panel")
         .fullScreenCover(item: $player) { p in
             DYListPlayer(bridge: bridge, title: author.name.isEmpty ? "作品" : author.name, items: posts, start: p.index,
                          loadMore: { await loadPosts() }, onAuthor: { _ in })
@@ -1386,6 +1382,8 @@ struct DYAuthorScreen: View {
             _ = await loadPosts()
         }
     }
+
+    private func close() { if let onClose { onClose() } else { dismiss() } }
 
     @ViewBuilder
     private var followButton: some View {

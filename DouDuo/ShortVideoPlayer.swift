@@ -150,13 +150,15 @@ extension PlayerPage {
                          fillWidth: Bool = true, danmaku: [DYDanmaku] = [], altURL: URL? = nil,
                          quality: String? = nil, fastURL: URL? = nil, posterURL: URL? = nil,
                          videoAspect: Double = 0,
-                         headEndSeconds: Double? = nil, continuationURL: URL? = nil) -> PlayerPage {
+                         headEndSeconds: Double? = nil, continuationURL: URL? = nil,
+                         onSwipeLeft: (() -> Void)? = nil, onSwipeRight: (() -> Void)? = nil) -> PlayerPage {
         PlayerPage(id: id, url: url, knownDuration: durationSec, isActive: isActive, bottomInset: bottomInset,
                    resumePosition: resumePosition, preparedPlayer: preparedPlayer, onEnded: onEnded,
                    onDoubleTap: onDoubleTap, onSavePosition: onSavePosition, fillWidth: fillWidth,
                    topInset: topInset, danmaku: danmaku, altURL: altURL, quality: quality, fastURL: fastURL,
                    posterURL: posterURL, headEndSeconds: headEndSeconds,
-                   continuationURL: continuationURL, videoAspect: videoAspect, title: title)
+                   continuationURL: continuationURL, videoAspect: videoAspect, title: title,
+                   navigationSwipes: true, onSwipeLeft: onSwipeLeft, onSwipeRight: onSwipeRight)
     }
 }
 
@@ -196,6 +198,9 @@ struct PlayerPage: View {
     var videoAspect: Double = 0
     /// 锁屏 / 控制中心「正在播放」上显示的标题
     var title: String = ""
+    var navigationSwipes = false
+    var onSwipeLeft: (() -> Void)? = nil
+    var onSwipeRight: (() -> Void)? = nil
     /// 上一次刷新「正在播放」信息的位置（约每秒一次）
     @State private var lastNowPlaying = -10.0
     /// 静音（右下角按钮，全局记住）
@@ -440,7 +445,10 @@ struct PlayerPage: View {
                     #endif
                 if seeking { seekTo(seekPreview); seeking = false; previewImage = nil }
             },
-            verticalFirst: true
+            verticalFirst: true,
+            onHorizontalSwipe: navigationSwipes ? { left in
+                if left { onSwipeLeft?() } else { onSwipeRight?() }
+            } : nil
         )
     }
 
@@ -477,7 +485,7 @@ struct PlayerPage: View {
         return VStack(spacing: 0) {
             GeometryReader { g in
                 ZStack(alignment: .leading) {
-                    // 平时半透明不挡画面（横滑全屏都能拖进度），拖动时才变实
+                    // 平时半透明不挡画面，只有进度条拖动时才变实
                     Capsule().fill(.white.opacity(seeking ? 0.28 : 0.12)).frame(height: (seeking ? 6 : 2) * ui)
                     Capsule().fill(.white.opacity(seeking ? 1 : 0.4)).frame(width: g.size.width * frac, height: (seeking ? 6 : 2) * ui)
                     Circle().fill(.white.opacity(seeking ? 1 : 0.45)).frame(width: (seeking ? 15 : 6) * ui, height: (seeking ? 15 : 6) * ui)

@@ -1,6 +1,6 @@
 import XCTest
 
-/// DouDuo 核心流程：推荐流加载 → 视频在走 → 上滑切下一条 → 横滑快进 → 点作者进主页 → 能返回原生页
+/// DouDuo 核心流程：推荐流加载 → 视频在走 → 上滑切下一条 → 左滑作者/右滑关注 → 点作者进主页 → 能返回原生页
 final class DouDuoUITests: XCTestCase {
     /// 菜单与官网分享面板：仅打开、查看、关闭，绝不点击朋友或发送。
     func testMenuCleanupAndFriendForwardWithoutSending() throws {
@@ -376,22 +376,39 @@ final class DouDuoUITests: XCTestCase {
         addTeardownBlock { app.terminate() }
         app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7705789488781932361"
         app.launch()
+        guard app.windows.firstMatch.frame.width >= 700 else {
+            throw XCTSkip("只验收已经展开的 Duo 内屏；不把外屏或 iPad 当作替代")
+        }
         let current = app.staticTexts["douyin.currentID"]
         XCTAssertTrue(current.waitForExistence(timeout: 40))
         let comment = app.buttons["douyin.comments"].firstMatch
         XCTAssertTrue(comment.waitForExistence(timeout: 10))
+        XCTAssertTrue(wait(label: "7705789488781932361", on: current, timeout: 45))
         let id = current.label
         comment.tap()
         let close = app.buttons["douyin.comments.close"].firstMatch
         XCTAssertTrue(close.waitForExistence(timeout: 10))
         let info = app.otherElements["douyin.video.info"].firstMatch
-        XCTAssertLessThan(info.frame.maxX, close.frame.minX, "视频留在左侧，评论在右侧")
+        let panel = app.otherElements["douyin.comments.panel"].firstMatch
+        XCTAssertLessThanOrEqual(info.frame.maxX, panel.frame.minX, "视频留在左侧，评论在右侧")
+        XCTAssertGreaterThan(panel.frame.width, app.frame.width * 0.4)
+        XCTAssertLessThan(panel.frame.width, app.frame.width * 0.55)
+        XCTAssertLessThanOrEqual(panel.frame.minY, 4)
+        XCTAssertGreaterThan(panel.frame.height, app.frame.height * 0.9)
         XCTAssertTrue(app.buttons["douyin.search"].firstMatch.isHittable)
         XCTAssertTrue(app.buttons["douyin.more"].firstMatch.isHittable)
         attach(app, "duo-inner-glass-comments")
         close.tap()
         XCTAssertEqual(current.label, id)
         attach(app, "duo-inner-return-same-video")
+        app.buttons["douyin.author.avatar"].firstMatch.tap()
+        let author = app.otherElements["douyin.author.panel"].firstMatch
+        XCTAssertTrue(author.waitForExistence(timeout: 10))
+        XCTAssertGreaterThan(author.frame.minX, app.frame.width * 0.35)
+        XCTAssertLessThanOrEqual(info.frame.maxX, author.frame.minX)
+        attach(app, "duo-inner-author-split")
+        app.buttons["douyin.author.back"].firstMatch.tap()
+        XCTAssertEqual(current.label, id)
     }
 
     /// 倍速两条线互不污染：设置是全局速度（当前视频立刻生效），长按下滑锁的 2 倍只锁本条、上滑取消。
@@ -478,10 +495,11 @@ final class DouDuoUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-douyin_muted_v1", "YES"]
         addTeardownBlock { app.terminate() }
-        app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7705789488781932361"
+        app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
         app.launch()
         let current = app.staticTexts["douyin.currentID"]
         XCTAssertTrue(current.waitForExistence(timeout: 40))
+        XCTAssertTrue(wait(label: "7678628867820506406", on: current, timeout: 45))
         let like = app.buttons["douyin.like"].firstMatch
         let comment = app.buttons["douyin.comments"].firstMatch
         let collect = app.buttons["douyin.collect"].firstMatch
@@ -493,11 +511,17 @@ final class DouDuoUITests: XCTestCase {
             XCTAssertTrue(item.isHittable)
         }
         let originalID = current.label
+        let dockFrame = dock.frame
+        let avatar = app.buttons["douyin.author.avatar"].firstMatch
+        XCTAssertTrue(avatar.isHittable)
+        XCTAssertLessThan(avatar.frame.midY, like.frame.midY)
         XCTAssertLessThan(like.frame.midY, comment.frame.midY)
         XCTAssertLessThan(comment.frame.midY, collect.frame.midY)
         XCTAssertLessThan(collect.frame.maxY, dock.frame.minY)
         XCTAssertLessThan(search.frame.midY, like.frame.minY)
         XCTAssertLessThan(more.frame.midX, search.frame.midX)
+        XCTAssertEqual(dock.frame.midX, like.frame.midX, accuracy: 1, "Dock 由系统对齐互动栏")
+        XCTAssertLessThanOrEqual(dock.frame.width, like.frame.width + 2)
         for item in [like, comment, collect] {
             XCTAssertTrue(item.label.rangeOfCharacter(from: .decimalDigits) != nil, "数量须保留给辅助功能")
         }
@@ -507,6 +531,19 @@ final class DouDuoUITests: XCTestCase {
         let progress = app.otherElements["douyin.progress"].firstMatch
         XCTAssertTrue(progress.exists)
         XCTAssertFalse(progress.frame.intersects(dock.frame), "进度条及拖动区域不能进入 Dock")
+        let author = app.buttons["douyin.author"].firstMatch
+        let description = app.staticTexts["douyin.description"].firstMatch
+        let metadata = app.staticTexts["douyin.video.metadata"].firstMatch
+        let music = app.descendants(matching: .any).matching(identifier: "douyin.video.music").firstMatch
+        XCTAssertTrue(author.label.hasPrefix("@"))
+        XCTAssertLessThan(author.frame.maxY, description.frame.minY)
+        if metadata.exists {
+            XCTAssertLessThan(description.frame.maxY, metadata.frame.minY)
+            XCTAssertLessThan(metadata.frame.maxY, music.frame.minY)
+        }
+        XCTAssertLessThan(music.frame.maxY, progress.frame.maxY)
+        XCTAssertLessThan(progress.frame.maxY - music.frame.maxY, 32, "音乐须贴近进度条")
+        attach(app, "duo-default-transparent-header")
         let expand = app.buttons["展开"].firstMatch
         if expand.exists && expand.isHittable {
             expand.tap()
@@ -518,23 +555,92 @@ final class DouDuoUITests: XCTestCase {
         comment.tap()
         let close = app.buttons["douyin.comments.close"].firstMatch
         XCTAssertTrue(close.waitForExistence(timeout: 15))
-        attach(app, "duo-liquid-glass-comments")
+        let panel = app.otherElements["douyin.comments.panel"].firstMatch
+        let related = app.scrollViews["douyin.comments.relatedSearch"].firstMatch
+        if related.exists {
+            XCTAssertLessThanOrEqual(related.frame.maxX, panel.frame.maxX + 1)
+        }
+        attach(app, "duo-single-glass-comments")
         close.tap()
         XCTAssertTrue(dock.waitForExistence(timeout: 5))
-        for destination in ["我的", "私信", "主页"] {
+        for (destination, key) in [("我的", "mine"), ("私信", "messages"), ("主页", "home")] {
             dock.tap()
-            let choice = app.buttons[destination].firstMatch
+            let choice = app.buttons["douyin.dock." + key].firstMatch
             XCTAssertTrue(choice.waitForExistence(timeout: 5), app.debugDescription)
-            attach(app, "duo-dock-menu-" + destination)
+            if info.exists {
+                for key in ["home", "messages", "mine"] {
+                    XCTAssertFalse(info.frame.intersects(app.buttons["douyin.dock." + key].frame), "展开 Dock 也不能挡文案")
+                }
+            }
+            attach(app, "duo-dock-expanded-" + destination)
             choice.tap()
             XCTAssertTrue(NSPredicate(format: "label CONTAINS %@", destination)
                 .evaluate(with: dock), app.debugDescription)
+            let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                dock.exists && abs(dock.frame.midY - dockFrame.midY) < 1
+            }, object: dock)
+            let positionResult = XCTWaiter.wait(for: [settled], timeout: 5)
+            attach(app, "duo-fixed-position-" + key)
+            print("DD_DOCK_FRAME_\(key): \(dock.frame)")
+            if positionResult != .completed { print(app.debugDescription) }
+            XCTAssertEqual(dock.frame.midX, dockFrame.midX, accuracy: 1)
+            XCTAssertEqual(dock.frame.midY, dockFrame.midY, accuracy: 1)
+            XCTAssertEqual(app.buttons.matching(identifier: "douyin.dock").count, 1, "三个栏目只显示同一个 Dock")
+            XCTAssertFalse(app.buttons["douyin.mine.back"].exists)
+            XCTAssertFalse(app.buttons["douyin.messages.back"].exists)
+            attach(app, "duo-fixed-dock-" + key)
         }
         XCTAssertEqual(current.label, originalID, "栏目切换不能重置当前视频")
         search.tap()
         XCTAssertTrue(app.searchFields.firstMatch.waitForExistence(timeout: 5)
             || app.textFields.firstMatch.exists, app.debugDescription)
         attach(app, "duo-top-search")
+    }
+
+    func testVideoSwipesNavigateAndProgressStillSeeks() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += ["-douyin_muted_v1", "YES"]
+        app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7705789488781932361"
+        addTeardownBlock { app.terminate() }
+        app.launch()
+        let current = app.staticTexts["douyin.currentID"]
+        XCTAssertTrue(current.waitForExistence(timeout: 40))
+        XCTAssertTrue(wait(label: "7705789488781932361", on: current, timeout: 45))
+        let like = app.buttons["douyin.like"].firstMatch
+        XCTAssertTrue(like.waitForExistence(timeout: 45))
+        let progress = app.otherElements["douyin.progress"].firstMatch
+        XCTAssertTrue(progress.waitForExistence(timeout: 10))
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.48))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.48))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        XCTAssertTrue(app.buttons["douyin.channel.follow"].firstMatch.isHittable)
+        XCTAssertEqual(app.buttons["douyin.channel.follow"].value as? String, "已选择")
+        attach(app, "duo-swipe-right-follow")
+        app.buttons["douyin.channel.recommend"].tap()
+        XCTAssertTrue(like.waitForExistence(timeout: 10))
+        end.press(forDuration: 0.05, thenDragTo: start)
+        let back = app.buttons["douyin.author.back"].firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 10), "左滑须打开作者页")
+        attach(app, "duo-swipe-left-author")
+        back.tap()
+        XCTAssertTrue(progress.waitForExistence(timeout: 10))
+        let before = (progress.value as? String ?? "").split { !$0.isNumber }.compactMap { Double($0) }
+        XCTAssertEqual(before.count, 2)
+        XCTAssertGreaterThan(before[1], 0)
+        let forward = before[0] < before[1] * 0.5
+        progress.coordinate(withNormalizedOffset: CGVector(dx: forward ? 0.35 : 0.65, dy: 0.7))
+            .press(forDuration: 0.1, thenDragTo: progress.coordinate(withNormalizedOffset: CGVector(dx: forward ? 0.65 : 0.35, dy: 0.7)))
+        let seeked = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let after = (progress.value as? String ?? "").split { !$0.isNumber }.compactMap { Double($0) }
+            return after.count == 2 && (after[0] - before[0]) * (forward ? 1 : -1) > before[1] * 0.2
+        }, object: progress)
+        XCTAssertEqual(XCTWaiter.wait(for: [seeked], timeout: 7), .completed, "进度条仍按原版相对拖动跳转")
+        attach(app, "duo-progress-drag")
+        let previous = current.label
+        app.swipeUp(velocity: .fast)
+        let advanced = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label != %@", previous), object: current)
+        XCTAssertEqual(XCTWaiter.wait(for: [advanced], timeout: 10), .completed, "竖滑切视频保持有效")
     }
 
     func testCommentImages() throws {
