@@ -147,7 +147,8 @@ extension PlayerPage {
                          preparedPlayer: (() -> AVPlayer?)? = nil,
                          onEnded: (() -> Void)?, onDoubleTap: (() -> Void)?,
                          onSavePosition: @escaping (Double) -> Void, onClose: @escaping () -> Void,
-                         fillWidth: Bool = true, danmaku: [DYDanmaku] = [], altURL: URL? = nil,
+                         fillWidth: Bool = true, onFillWidthChange: ((Bool) -> Void)? = nil,
+                         danmaku: [DYDanmaku] = [], altURL: URL? = nil,
                          quality: String? = nil, fastURL: URL? = nil, posterURL: URL? = nil,
                          videoAspect: Double = 0,
                          headEndSeconds: Double? = nil, continuationURL: URL? = nil,
@@ -155,6 +156,7 @@ extension PlayerPage {
         PlayerPage(id: id, url: url, knownDuration: durationSec, isActive: isActive, bottomInset: bottomInset,
                    resumePosition: resumePosition, preparedPlayer: preparedPlayer, onEnded: onEnded,
                    onDoubleTap: onDoubleTap, onSavePosition: onSavePosition, fillWidth: fillWidth,
+                   onFillWidthChange: onFillWidthChange,
                    topInset: topInset, danmaku: danmaku, altURL: altURL, quality: quality, fastURL: fastURL,
                    posterURL: posterURL, headEndSeconds: headEndSeconds,
                    continuationURL: continuationURL, videoAspect: videoAspect, title: title,
@@ -176,6 +178,7 @@ struct PlayerPage: View {
     let onSavePosition: (Double) -> Void
     /// 竖屏时视频比屏幕窄（左右黑边）→ 放大铺满宽度；关掉则保持完整画面（上下留边）
     var fillWidth: Bool = true
+    var onFillWidthChange: ((Bool) -> Void)? = nil
     var topInset: CGFloat = 0
     /// 视频弹幕（空 = 不显示）
     var danmaku: [DYDanmaku] = []
@@ -256,12 +259,14 @@ struct PlayerPage: View {
     @State private var fastT0 = Date()
     private let playbackID = UUID()
     @State private var videoScale: CGFloat = 1
-    @State private var pinchStartScale: CGFloat = 1
+    @State private var pinchMagnitude: CGFloat = 1
 
     var body: some View {
         ZStack {
             Color.black
-            if videoScale < 1, let posterURL {
+            // All playback entry points share this backdrop. Mask the player's
+            // opaque letterbox below so uncovered areas reveal the blurred cover.
+            if let posterURL {
                 GeometryReader { geometry in
                     CachedAsyncImage(url: posterURL) { image in
                         image.resizable().scaledToFill()
@@ -273,6 +278,7 @@ struct PlayerPage: View {
                 }
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
+                .accessibilityIdentifier("douyin.video.backdrop")
             }
             videoPlane
                 .mask {
@@ -285,8 +291,8 @@ struct PlayerPage: View {
                             ? CGSize(width: size.width, height: size.width / aspect)
                             : CGSize(width: size.height * aspect, height: size.height)
                         Rectangle()
-                            .frame(width: videoScale < 1 && !fills ? fitted.width : size.width,
-                                   height: videoScale < 1 && !fills ? fitted.height : size.height)
+                            .frame(width: !fills ? fitted.width : size.width,
+                                   height: !fills ? fitted.height : size.height)
                             .position(x: size.width / 2, y: size.height / 2)
                     }
                 }
@@ -300,6 +306,12 @@ struct PlayerPage: View {
             #if DEBUG
             Text(String(format: "%.2f", videoScale)).font(.caption2).opacity(0.01)
                 .accessibilityIdentifier("douyin.video.zoom")
+                .allowsHitTesting(false)
+            Text(fillWidth ? "fill" : "fit").font(.caption2).opacity(0.01)
+                .accessibilityIdentifier("douyin.video.fitMode")
+                .allowsHitTesting(false)
+            Text("\(DYGestureDiagnostics.shared.boostStarts)").font(.caption2).opacity(0.01)
+                .accessibilityIdentifier("douyin.video.boostStarts")
                 .allowsHitTesting(false)
             #endif
             if seeking { seekHUD }
@@ -372,7 +384,7 @@ struct PlayerPage: View {
             else if let p = player, isPlaying { p.rate = Float(target) }
         }
         .onChange(of: isActive) { _, active in
-            if !active { lockedBoost = false; videoScale = 1; pinchStartScale = 1 }   // 滑走就解锁：只锁「当前这条」
+            if !active { lockedBoost = false; videoScale = 1; pinchMagnitude = 1 }   // 滑走就解锁：只锁「当前这条」
             if active { bindRemote() }
             if let v = vlc {
                 if active { v.mediaPlayer.audio?.isMuted = muted; v.mediaPlayer.play(); isPlaying = true }
@@ -494,9 +506,19 @@ struct PlayerPage: View {
             onHorizontalSwipe: navigationSwipes ? { left in
                 if left { onSwipeLeft?() } else { onSwipeRight?() }
             } : nil,
-            onPinchBegan: { pinchStartScale = videoScale },
-            onPinchChanged: { scale in videoScale = min(3, max(0.45, pinchStartScale * scale)) },
-            onPinchEnded: { pinchStartScale = videoScale }
+            onPinchBegan: { pinchMagnitude = 1 },
+            onPinchChanged: { scale in
+                pinchMagnitude = scale
+                videoScale = min(1.2, max(0.8, scale))
+            },
+            onPinchEnded: {
+                // Commit the existing global fit setting; never leave a video
+                // at an arbitrary size or an off-centre position after release.
+                if pinchMagnitude < 0.94 { onFillWidthChange?(false) }
+                else if pinchMagnitude > 1.06 { onFillWidthChange?(true) }
+                withAnimation(.snappy(duration: 0.22)) { videoScale = 1 }
+                pinchMagnitude = 1
+            }
         )
     }
 

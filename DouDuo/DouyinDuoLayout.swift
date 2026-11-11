@@ -148,13 +148,16 @@ struct DYCommentPaneMetrics {
     let paneOrigin: CGPoint
     let trailingInset: CGFloat
 
-    init(_ geo: GeometryProxy, isPresented: Bool, allowsResident: Bool = true) {
+    init(_ geo: GeometryProxy, isPresented: Bool, allowsResident: Bool = true,
+         paneFraction: CGFloat = 1 / 3) {
         let w = geo.size.width, h = geo.size.height
         resident = allowsResident && DYDuoMetrics.foldIsActive(geo)
         let tableFold = resident && w <= h
         sideBySide = w >= DYDuoMetrics.legacyWideMin || (resident && w > h)
         showsPane = resident || (sideBySide && isPresented)
-        let paneW = showsPane && sideBySide ? w * 0.5 : 0
+        // Measure against the physical screen, including the vertical status bar.
+        let paneW = showsPane && sideBySide
+            ? max(0, (w + geo.safeAreaInsets.trailing) * paneFraction - geo.safeAreaInsets.trailing) : 0
         let paneH = tableFold ? h * 0.45 : 0
         videoSize = CGSize(width: w - paneW, height: h - paneH)
         trailingInset = geo.safeAreaInsets.trailing
@@ -180,35 +183,43 @@ struct DYCommentPlayerLayout<Video: View>: View {
     @ViewBuilder var video: (EdgeInsets) -> Video
 
     var body: some View {
-        GeometryReader { geo in
-            let layout = DYCommentPaneMetrics(geo, isPresented: showComments)
-            ZStack(alignment: .topLeading) {
-                video(geo.safeAreaInsets)
-                    .environment(\.duoInlineVideoNavigation, layout.showsPane)
-                    .frame(width: layout.videoSize.width, height: layout.videoSize.height)
-                if layout.showsPane, let aweme {
-                    DYCommentPanel(bridge: bridge, aweme: aweme,
-                                   onClose: layout.resident ? nil : { showComments = false },
-                                   focus: focus, fillsPane: true,
-                                   trailingInset: layout.trailingInset)
-                        .id(aweme.id)
-                        .frame(width: layout.paneSize.width, height: layout.paneSize.height)
-                        .clipped()
-                        .overlay(alignment: .leading) { if layout.sideBySide { Divider() } }
-                        .offset(x: layout.paneOrigin.x, y: layout.paneOrigin.y)
+        NavigationStack {
+            GeometryReader { geo in
+                let layout = DYCommentPaneMetrics(geo, isPresented: showComments)
+                ZStack(alignment: .topLeading) {
+                    video(geo.safeAreaInsets)
+                        .environment(\.duoInlineVideoNavigation, layout.showsPane)
+                        .frame(width: layout.videoSize.width, height: layout.videoSize.height)
+                    if layout.showsPane, let aweme {
+                        DYCommentPanel(bridge: bridge, aweme: aweme,
+                                       onClose: layout.resident ? nil : { showComments = false },
+                                       focus: focus, fillsPane: true,
+                                       trailingInset: layout.trailingInset)
+                            .id(aweme.id)
+                            .frame(width: layout.paneSize.width, height: layout.paneSize.height)
+                            .clipped()
+                            .overlay(alignment: .leading) { if layout.sideBySide { Divider() } }
+                            .offset(x: layout.paneOrigin.x, y: layout.paneOrigin.y)
+                    }
                 }
-            }
-            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
-            .background(Color.black.ignoresSafeArea())
-            .animation(.snappy, value: showComments)
-            .animation(.snappy, value: layout.resident)
-            .sheet(isPresented: Binding(
-                get: { showComments && !layout.sideBySide && !layout.resident && aweme != nil },
-                set: { if !layout.sideBySide && !layout.resident { showComments = $0 } }
-            )) {
-                if let aweme {
-                    DYCommentSheet(bridge: bridge, aweme: aweme,
-                                   onClose: { showComments = false }, focus: focus)
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                .background(Color.black.ignoresSafeArea())
+                .toolbarVisibility(layout.showsPane ? .hidden : .automatic, for: .tabBar)
+                .toolbarVisibility(layout.showsPane ? .visible : .hidden, for: .navigationBar)
+                .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
+                .overlayPreferenceValue(DYActiveVideoRailKey.self) { rail in
+                    if layout.showsPane { DYNativeVideoRail(rail: rail) }
+                }
+                .animation(.snappy, value: showComments)
+                .animation(.snappy, value: layout.resident)
+                .sheet(isPresented: Binding(
+                    get: { showComments && !layout.sideBySide && !layout.resident && aweme != nil },
+                    set: { if !layout.sideBySide && !layout.resident { showComments = $0 } }
+                )) {
+                    if let aweme {
+                        DYCommentSheet(bridge: bridge, aweme: aweme,
+                                       onClose: { showComments = false }, focus: focus)
+                    }
                 }
             }
         }

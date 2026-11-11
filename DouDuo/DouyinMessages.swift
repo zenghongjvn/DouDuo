@@ -1046,9 +1046,11 @@ struct DYNoticeListScreen: View {
             if !active { replyFocused = false }
         }
         .sheet(item: $author) { a in
-            DYAuthorScreen(bridge: bridge, author: a, onWeb: onWeb)
-                .presentationDetents([.medium, .large])
-                .presentationBackground(.black)
+            NavigationStack {
+                DYAuthorScreen(bridge: bridge, author: a, onWeb: onWeb)
+            }
+            .presentationDetents([.medium, .large])
+            .presentationBackground(.black)
         }
         .fullScreenCover(item: $player) { p in
             DYListPlayer(bridge: bridge, title: p.item.desc.isEmpty ? "视频" : p.item.desc, items: [p.item], start: 0,
@@ -1792,7 +1794,7 @@ struct DYForwardPresentation: ViewModifier {
             .sheet(isPresented: $showing) {
                 DYForwardScreen(item: item)
                     .toolbarVerticalBehavior(.disabled)
-                    .presentationDetents([.height(430), .large])
+                    .presentationDetents([.height(DDTheme.shareSheetHeight), .large])
                     .presentationDragIndicator(.hidden)
                     .presentationCornerRadius(DDTheme.sheetCornerRadius)
             }
@@ -1828,12 +1830,15 @@ struct DYForwardScreen: View {
     @State private var showLogin = false
     @State private var showOtherApps = false
     @State private var copiedLink = false
+    @State private var saving = false
+    @State private var saveMessage: String?
 
     private var actions: [DYForwardPanelAction] {
         var result: [DYForwardPanelAction] = []
         if !model.contacts.isEmpty { result.append(.init(id: "private", title: "私信好友", symbol: "paperplane.fill")) }
         if model.contacts.contains(where: { $0.kind == 2 }) { result.append(.init(id: "groups", title: "分享至群", symbol: "person.2.fill")) }
         result.append(.init(id: "copy", title: "复制链接", symbol: "link"))
+        result.append(.init(id: "download", title: saving ? "保存中…" : "下载", symbol: "arrow.down.to.line"))
         result.append(.init(id: "other", title: "其他分享", symbol: "square.and.arrow.up"))
         if model.loginRequired { result.append(.init(id: "login", title: "登录抖音", symbol: "person.crop.circle")) }
         else if !model.loading && model.contacts.isEmpty { result.append(.init(id: "retry", title: "重新加载", symbol: "arrow.clockwise")) }
@@ -1844,10 +1849,10 @@ struct DYForwardScreen: View {
     }
     var body: some View {
         DYNativeForwardPanel(contacts: accountPrepared ? model.contacts : [], loading: !accountPrepared || model.loading || model.sending,
-                             status: accountPrepared ? (copiedLink ? "链接已复制" : model.message) : "正在加载朋友…", actions: accountPrepared ? actions : [],
+                             status: accountPrepared ? (saveMessage ?? (copiedLink ? "链接已复制" : model.message)) : "正在加载朋友…", actions: actions,
                              onContact: { if !model.sending { selected = $0 } },
                              onAction: perform, onClose: { if !model.sending { dismiss() } })
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .background {
                 // Only the system sheet draws glass. Keep the signing/sending
                 // bridge hidden and preserve its real official account context.
@@ -1911,7 +1916,18 @@ struct DYForwardScreen: View {
         guard !model.sending else { return }
         switch action {
         case "private", "groups": groupsOnly = action == "groups"; query = ""; showContacts = true
-        case "copy": UIPasteboard.general.url = item.webURL; copiedLink = true
+        case "copy": UIPasteboard.general.url = item.webURL; saveMessage = nil; copiedLink = true
+        case "download":
+            guard !saving else { return }
+            saving = true
+            saveMessage = "正在保存…"
+            Task {
+                defer { saving = false }
+                do {
+                    try await DYSaver.save(item)
+                    saveMessage = item.images.isEmpty ? "视频已保存到相册" : "图集已保存到相册"
+                } catch { saveMessage = "保存失败：\(error.localizedDescription)" }
+            }
         case "other": showOtherApps = true
         case "login": showLogin = true
         case "retry": model.web?.reload()

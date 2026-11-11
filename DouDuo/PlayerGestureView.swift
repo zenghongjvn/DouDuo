@@ -50,8 +50,9 @@ struct PlayerGestureView: UIViewRepresentable {
 
         let long = UILongPressGestureRecognizer(target: c, action: #selector(Coordinator.handleLong(_:)))
         long.minimumPressDuration = 0.5
-        // 长按期间要能跟手指：上/下滑 50pt 才判定锁定/解锁（原来 12pt 就取消长按，导致锁不上 2 倍速）
-        long.allowableMovement = .greatestFiniteMagnitude
+        // Before recognition this is a stationary press. A drag must fail it,
+        // even if the finger stops moving and stays down on the next video.
+        long.allowableMovement = 12
         long.delegate = c
         c.long = long
 
@@ -105,6 +106,11 @@ struct PlayerGestureView: UIViewRepresentable {
         @objc func handleLong(_ g: UILongPressGestureRecognizer) {
             switch g.state {
             case .began:
+                // Only a recognized hold may turn into the lock/unlock drag.
+                g.allowableMovement = .greatestFiniteMagnitude
+                #if DEBUG
+                DYGestureDiagnostics.shared.boostStarts += 1
+                #endif
                 parent.onLongPress(true)
                 pressStartY = g.location(in: view).y; pressLocked = false
                 // 长按期间下滑不能触发外层切视频：先把外层 ScrollView 的滑动关掉，松手再恢复
@@ -119,6 +125,7 @@ struct PlayerGestureView: UIViewRepresentable {
                     if dy > 0 { parent.onLongPressLock() } else { parent.onLongPressUnlock() }
                 }
             case .ended, .cancelled, .failed:
+                g.allowableMovement = 12
                 frozenScroll?.panGestureRecognizer.isEnabled = true; frozenScroll = nil
                 pressLocked = false
                 parent.onLongPress(false)
@@ -191,6 +198,17 @@ struct PlayerGestureView: UIViewRepresentable {
         func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
             if g is UIPinchGestureRecognizer { return true }
             if let pinch, pinch.state == .began || pinch.state == .changed { return false }
+            if g === long {
+                if let pan, pan.state == .began || pan.state == .changed { return false }
+                var ancestor = view?.superview
+                while let current = ancestor {
+                    if let scroll = current as? UIScrollView,
+                       scroll.isDragging || scroll.panGestureRecognizer.state == .began || scroll.panGestureRecognizer.state == .changed {
+                        return false
+                    }
+                    ancestor = current.superview
+                }
+            }
             if g is UIScreenEdgePanGestureRecognizer { return parent.onHorizontalSwipe == nil }
             guard let pg = g as? UIPanGestureRecognizer, let v = view else { return true }
             // 长按（2 倍速）期间不触发快进
@@ -222,3 +240,12 @@ struct PlayerGestureView: UIViewRepresentable {
         }
     }
 }
+
+#if DEBUG
+/// UI regression evidence for a hold that might start and end within one drag.
+/// Excluded from the installable Release app.
+@Observable final class DYGestureDiagnostics {
+    static let shared = DYGestureDiagnostics()
+    var boostStarts = 0
+}
+#endif

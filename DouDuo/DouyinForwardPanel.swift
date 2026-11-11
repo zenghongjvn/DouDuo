@@ -48,12 +48,9 @@ struct DYNativeForwardPanel: View {
             }
 
             Divider().padding(.top, 14)
-            actionRow(actions.filter { ["private", "groups", "other"].contains($0.id) }, colored: true)
-                .padding(.vertical, 14)
-            Divider()
-            actionRow(actions.filter { !["private", "groups", "other"].contains($0.id) }, colored: false)
-                .padding(.vertical, 14)
-            Spacer(minLength: 0)
+            actionRow(actions)
+                .padding(.top, 14)
+                .padding(.bottom, 6)
         }
         .foregroundStyle(.themeTextPrimary)
         .accessibilityElement(children: .contain)
@@ -139,7 +136,7 @@ struct DYNativeForwardPanel: View {
         return loading ? "正在加载分享联系人…" : "暂无可分享的联系人"
     }
 
-    private func actionRow(_ row: [DYForwardPanelAction], colored: Bool) -> some View {
+    private func actionRow(_ row: [DYForwardPanelAction]) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(alignment: .top, spacing: WuWeiDesign.Spacing.sm) {
                 ForEach(row) { action in
@@ -149,7 +146,7 @@ struct DYNativeForwardPanel: View {
                                 .font(.title2.weight(.semibold))
                                 .frame(width: avatarSize, height: avatarSize)
                                 .foregroundStyle(.white)
-                                .background(colored ? (action.id == "private" ? Color(red: 1, green: 0.16, blue: 0.34) : Color.blue) : Color.black.opacity(0.3), in: Circle())
+                                .background(action.id == "private" ? Color(red: 1, green: 0.16, blue: 0.34) : Color.black.opacity(0.3), in: Circle())
                                 .accessibilityHidden(true)
                             Text(action.title)
                                 .font(.caption)
@@ -167,5 +164,6 @@ struct DYNativeForwardPanel: View {
             .padding(.horizontal, inset)
         }
         .fixedSize(horizontal: false, vertical: true)
+        .accessibilityIdentifier("douyin.forward.actions")
     }
 }

@@ -1335,15 +1335,6 @@ struct DYAuthorScreen: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Button { close() } label: {
-                    Image(systemName: "chevron.left").font(.headline.weight(.semibold)).foregroundStyle(.white)
-                        .frame(width: 40, height: 40)
-                }
-                .accessibilityIdentifier("douyin.author.back")
-                Spacer()
-                followButton
-            }
             if let u = user {
                 DYUserHeader(user: u)
             } else if let err {
@@ -1377,6 +1368,19 @@ struct DYAuthorScreen: View {
         .background(Color.black)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("douyin.author.panel")
+        .navigationBarBackButtonHidden()
+        .toolbarVisibility(.hidden, for: .tabBar)
+        .toolbarVisibility(.visible, for: .navigationBar)
+        .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button("返回", systemImage: "chevron.backward", action: close)
+                    .accessibilityIdentifier("douyin.author.back")
+            }
+            .axisBehavior(.verticalPreferred)
+            ToolbarItem(placement: .primaryAction) { followButton }
+                .axisBehavior(.verticalPreferred)
+        }
         .fullScreenCover(item: $player) { p in
             DYListPlayer(bridge: bridge, title: author.name.isEmpty ? "作品" : author.name, items: posts, start: p.index,
                          loadMore: { await loadPosts() }, onAuthor: { _ in })
@@ -1395,15 +1399,10 @@ struct DYAuthorScreen: View {
     @ViewBuilder
     private var followButton: some View {
         let uid = followUID ?? author.uid
-        Button { Task { await toggleFollow() } } label: {
-            Text(followBusy ? "…" : (followed ? "已关注" : "关注"))
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(followed ? .white : .black)
-                .padding(.horizontal, 14)
-                .frame(height: 32)
-                .background(Capsule().fill(followed ? Color.white.opacity(0.16) : Color.white))
+        Button(followBusy ? "处理中" : (followed ? "已关注" : "关注"),
+               systemImage: followed ? "person.badge.minus" : "person.badge.plus") {
+            Task { await toggleFollow() }
         }
-        .buttonStyle(.plain)
         .disabled(followBusy || uid == nil || uid?.isEmpty == true)
         .accessibilityIdentifier("douyin.author.follow")
     }

@@ -1450,14 +1450,21 @@ struct DouyinFeedScreen: View {
                         .environment(\.duoInlineVideoNavigation, sidePanelOpen)
                         .environment(\.duoVisibleVideo, $visibleVideo)
                         .environment(\.duoDanmakuRequest, $danmakuRequest)
-                        .toolbarVisibility(.hidden, for: .navigationBar)
+                        .toolbarVisibility(.visible, for: .navigationBar)
+                        .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
                         .toolbarMinimizationBehavior(.never, for: .navigationBar)
                         .scrollEdgeEffectHidden(true, for: .all)
-                        .modifier(DYSystemTabBar())
+                        .modifier(DYSystemTabBar(hidden: true))
+                        .toolbar {
+                            ToolbarItem(placement: .bottomBar) {
+                                DYHomeTabMenu(selection: $mainTab)
+                            }
+                            .axisBehavior(.verticalPreferred)
+                            .hidden(sidePanelOpen || authorTarget != nil)
+                        }
                 }
             }
         }
-        .modifier(DYSystemTabBar())
         .toolbarVisibility(.visible, for: .statusBar)
         .onChange(of: mainTab) { _, selected in
             saveSession()
@@ -1512,7 +1519,7 @@ struct DouyinFeedScreen: View {
     /// - 半折叠：视频自动缩到一多半，另一半常驻评论（宽>高→左右分；高>宽→上下分）
     private func flatArrangement(_ geo: GeometryProxy) -> some View {
         let layout = DYCommentPaneMetrics(geo, isPresented: authorTarget != nil || showComments,
-                                          allowsResident: tab != .live)
+                                          allowsResident: tab != .live, paneFraction: authorTarget == nil ? 1 / 3 : 0.5)
         let w = geo.size.width, h = geo.size.height
 
         return ZStack(alignment: .topLeading) {
@@ -1524,6 +1531,7 @@ struct DouyinFeedScreen: View {
                         DYAuthorScreen(bridge: bridge, author: author,
                                        onWeb: { web = DYWebTarget(url: $0) },
                                        onClose: { withAnimation(.snappy) { authorTarget = nil } })
+                            .padding(.trailing, layout.trailingInset)
                             .id(author.id)
                     } else if let cur = commentAweme {
                         DYCommentPanel(bridge: bridge, aweme: cur,
@@ -1540,6 +1548,9 @@ struct DouyinFeedScreen: View {
         }
         .frame(width: w, height: h, alignment: .topLeading)
         .background(theme.media.strongScrim.color(for: scheme).ignoresSafeArea())
+        .overlayPreferenceValue(DYActiveVideoRailKey.self) { rail in
+            if authorTarget == nil { DYNativeVideoRail(rail: rail) }
+        }
         .animation(.snappy, value: layout.resident)
         .animation(.snappy, value: showComments)
         .animation(.snappy, value: authorTarget?.id)
@@ -1752,7 +1763,6 @@ struct DouyinFeedScreen: View {
         .navigationDestination(item: Binding(get: { supportsSidePanel ? nil : authorTarget }, set: { if !supportsSidePanel { authorTarget = $0 } })) { a in
             DYAuthorScreen(bridge: bridge, author: a, onWeb: { u in web = DYWebTarget(url: u) })
                 .navigationBarBackButtonHidden()
-                .toolbarVisibility(.hidden, for: .navigationBar)
         }
 
     }
@@ -2113,7 +2123,7 @@ struct DYVideoPage: View {
             .filter { $0.activationState == .foregroundActive }
             .flatMap(\.windows).first(where: \.isKeyWindow)?.safeAreaInsets.left ?? 0
         return EdgeInsets(top: 0, leading: max(insets.leading, left),
-                          bottom: 0, trailing: max(inlineNavigation ? 0 : systemColumnInset, railWidth + chromeSidePadding))
+                          bottom: 0, trailing: inlineNavigation ? 0 : max(systemColumnInset, railWidth + chromeSidePadding))
     }
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var scheme
@@ -2194,6 +2204,7 @@ struct DYVideoPage: View {
                                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { heart = false }
                                     },
                                     onSavePosition: onSavePosition, onClose: {}, fillWidth: autoFit,
+                                    onFillWidthChange: { autoFit = $0 },
                                     danmaku: danmakuOn ? danmaku : [],
                                     altURL: item.playAlt.flatMap(URL.init(string:)),
                                     quality: item.q,
@@ -2229,13 +2240,14 @@ struct DYVideoPage: View {
                 .padding(.bottom, max(insets.bottom - 24, 0) + (item.images.isEmpty ? 16 * ui : 16))
         }
         .overlay(alignment: .trailing) {
-            actions(fg)
-                .frame(width: railWidth)
-                .padding(.vertical, 7)
-                .glassEffect(.regular, in: .capsule)
-                .modifier(DYRailReservedNudge())
-                .padding(.trailing, actionRailTrailingPadding)
+            if !systemBars && !inlineNavigation {
+                actionCapsule(fg)
+                    .modifier(DYRailReservedNudge())
+                    .padding(.trailing, actionRailTrailingPadding)
+            }
         }
+        .preference(key: DYActiveVideoRailKey.self,
+                    value: isCurrent ? AnyView(actionCapsule(fg)) : nil)
         .overlay(alignment: .bottom) {
             if showDanmakuInput { danmakuBar.padding(.bottom, max(insets.bottom, 0) + 4) }
         }
@@ -2243,7 +2255,7 @@ struct DYVideoPage: View {
         .sheet(isPresented: $showShare) {
             DYForwardScreen(item: item)
                 .toolbarVerticalBehavior(.disabled)
-                .presentationDetents([.height(430), .large])
+                .presentationDetents([.height(DDTheme.shareSheetHeight), .large])
                 .presentationDragIndicator(.hidden)
                 .presentationCornerRadius(DDTheme.sheetCornerRadius)
         }
@@ -2368,6 +2380,13 @@ struct DYVideoPage: View {
         .buttonStyle(.plain)
         .accessibilityLabel("作者，" + item.author.name)
         .accessibilityIdentifier("douyin.author.avatar")
+    }
+
+    private func actionCapsule(_ foreground: Color) -> some View {
+        actions(foreground)
+            .frame(width: railWidth)
+            .padding(.vertical, 7)
+            .glassEffect(.regular, in: .capsule)
     }
 
     private func circularAvatar(_ image: UIImage) -> UIImage {
