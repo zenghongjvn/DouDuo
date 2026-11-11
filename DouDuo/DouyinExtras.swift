@@ -1,4 +1,4 @@
-// 抖Duo 扩展功能：搜索 / 我的（喜欢·收藏·历史·稍后再看）/ 关注 / 作者主页 / 弹幕 / 楼中楼 / 保存到相册
+// DouDuo 扩展功能：搜索 / 我的（喜欢·收藏·历史·稍后再看）/ 关注 / 作者主页 / 弹幕 / 楼中楼 / 保存到相册
 // 全部接口都走隐藏签名页（DouyinBridge.call），和推荐流同一套签名，不逆向。
 import SwiftUI
 import Combine
@@ -20,11 +20,36 @@ struct DYUser: Decodable, Equatable {
     let avatar: String?
     let signature: String
     let secUid: String
+    let uid: String
     let followers: Int
     let following: Int
     let likes: Int
     let works: Int
     let ip: String?
+}
+
+/// 评论表情（抖音官方表情包）
+struct DYEmoji: Codable, Identifiable, Hashable {
+    var id: String { displayName }
+    let displayName: String      // 形如 [微笑]，发送时就发这个文本
+    let url: String?             // CDN 图片（签名长期有效）
+}
+private struct DYEmojiResp: Decodable { let status: Int; let items: [DYEmoji] }
+
+/// @ 面板里的人（关注的人）
+struct DYFriend: Codable, Identifiable, Hashable {
+    var id: String { secUid.isEmpty ? name : secUid }
+    let name: String
+    let avatar: String?
+    let secUid: String
+}
+private struct DYFriendPage: Decodable { let status: Int; let items: [DYFriend]; let cursor: String; let hasMore: Bool }
+
+/// 抖音热搜一条：pos 为空 = 置顶条
+struct DYHot: Decodable, Equatable {
+    let word: String
+    let hot: Int
+    let pos: Int?
 }
 
 struct DYSug: Identifiable, Decodable, Equatable {
@@ -33,10 +58,11 @@ struct DYSug: Identifiable, Decodable, Equatable {
 }
 
 enum DYListKind: String, CaseIterable, Identifiable {
-    case like, collect, history, later
+    case post, like, collect, history, later
     var id: String { rawValue }
     var title: String {
         switch self {
+        case .post: "作品"
         case .like: "喜欢"
         case .collect: "收藏"
         case .history: "历史"
@@ -48,7 +74,7 @@ enum DYListKind: String, CaseIterable, Identifiable {
 private struct DYListPage: Decodable { let status: Int; let items: [DYAweme]; let cursor: String; let hasMore: Bool; let code: Int?; let msg: String? }
 private struct DYDanmakuPage: Decodable { let status: Int; let items: [DYDanmaku] }
 private struct DYReplyPage: Decodable { let status: Int; let items: [DYComment]; let cursor: Int; let hasMore: Bool; let msg: String? }
-private struct DYPublishResp: Decodable { let status: Int; let code: Int?; let msg: String?; let comment: DYComment?; let danmakuID: String? }
+private struct DYPublishResp: Decodable { let status: Int; let code: Int?; let msg: String?; let comment: DYComment?; let danmakuID: String?; let diagnostic: String? }
 private struct DYUserResp: Decodable { let status: Int; let user: DYUser?; let msg: String? }
 private struct DYSugResp: Decodable { let status: Int; let items: [DYSug] }
 
@@ -87,6 +113,9 @@ extension DouyinBridge {
 
     func myList(_ kind: DYListKind, cursor: String) async throws -> (items: [DYAweme], cursor: String, hasMore: Bool) {
         switch kind {
+        case .post:
+            let sec = try await selfSecUid()
+            return try await list(Self.postJS, ["sec": sec, "cursor": cursor])
         case .like:
             let sec = try await selfSecUid()
             return try await list(Self.likeJS, ["sec": sec, "cursor": cursor])
@@ -97,7 +126,41 @@ extension DouyinBridge {
     }
 
     func followFeed(cursor: String) async throws -> (items: [DYAweme], cursor: String, hasMore: Bool) {
-        try await list(Self.followJS, ["cursor": cursor])
+        // 未登录时抖音的关注流接口不报错，会塞推荐内容（游客兜底）。
+        // 必须先确认登录态，否则「关注」页会显示一堆不是关注的人。
+        if cursor == "0" { _ = try await selfProfile() }
+        let r = try await list(Self.followJS, ["cursor": cursor])
+        #if DEBUG
+        if cursor == "0" {
+            let me = try? await selfProfile()
+            let who = me.map { "\($0.name)(关注\($0.following)/粉丝\($0.followers))" } ?? "未登录"
+            let names = r.items.prefix(6).map { "\($0.author.name)[f\($0.author.follow ?? -1)]" }.joined(separator: " | ")
+            DYLiveModel.log("DDFOLLOW me=\(who) n=\(r.items.count) more=\(r.hasMore) cur=\(r.cursor) first=\(names)")
+        }
+        #endif
+        return r
+    }
+
+    /// 评论表情列表（抖音官方表情包，214 个；displayName 形如 [微笑]，发送时就发这个文本）
+    func emojiList() async -> [DYEmoji] {
+        guard let d = try? await call(Self.emojiJS, args: [:], attempts: 2),
+              let r = try? JSONDecoder().decode(DYEmojiResp.self, from: d) else { return [] }
+        let items = r.items.filter { !$0.displayName.isEmpty }
+        #if DEBUG
+        DYLiveModel.log("DDEMOJI status=\(r.status) n=\(items.count) hasUrl=\(items.filter { $0.url != nil }.count)")
+        #endif
+        return items
+    }
+
+    /// @ 面板的人：抖音评论 @ 的专用接口 familiar/atlist（返回「朋友」：互关/最近互动）
+    func followingUsers(cursor: String = "0") async throws -> (items: [DYFriend], cursor: String, hasMore: Bool) {
+        let d = try await call(Self.atListJS, args: ["cursor": cursor], attempts: 2)
+        let p = try JSONDecoder().decode(DYFriendPage.self, from: d)
+        #if DEBUG
+        DYLiveModel.log("DDFOLLOWING status=\(p.status) n=\(p.items.count) more=\(p.hasMore) first=\(p.items.prefix(3).map(\.name).joined(separator: ","))")
+        #endif
+        if p.status != 200 { throw DYError.blocked("HTTP \(p.status)") }
+        return (p.items, p.cursor, p.hasMore)
     }
 
     /// 搜索：网页接口只给第一页（翻第二页安全 SDK 直接压住不返回，换参数 / search_id 都一样）
@@ -106,6 +169,12 @@ extension DouyinBridge {
         guard offset == "0" else { return ([], offset, false) }
         let r = try await list(Self.searchJS, ["kw": kw, "cursor": "0"])
         return (r.items, r.cursor, false)
+    }
+
+    /// 抖音热搜
+    func hotSearch() async -> [DYHot] {
+        guard let d = try? await call(Self.hotJS, args: [:], attempts: 1) else { return [] }
+        return (try? JSONDecoder().decode([DYHot].self, from: d)) ?? []
     }
 
     func suggest(_ kw: String) async -> [DYSug] {
@@ -128,10 +197,11 @@ extension DouyinBridge {
     }
 
     /// 发评论 / 回复评论（replyID 非空 = 回复那条）
-    func publishComment(_ awemeID: String, text: String, replyID: String? = nil) async throws -> DYComment {
-        let d = try await call(Self.publishJS, args: ["id": awemeID, "text": text, "reply": replyID ?? "0"], attempts: 1)
+    /// 回复楼中楼：replyID = 一级评论 cid，replyToReplyID = 被回复的那条楼中楼 cid（网页 publishCommentItem 同款）
+    func publishComment(_ awemeID: String, text: String, replyID: String? = nil, replyToReplyID: String? = nil) async throws -> DYComment {
+        let d = try await call(Self.publishJS, args: ["id": awemeID, "text": text, "reply": replyID ?? "0", "replyTo": replyToReplyID ?? "0"], attempts: 1)
         let r = try JSONDecoder().decode(DYPublishResp.self, from: d)
-        DYLiveModel.log("DDSEND comment status=\(r.status) code=\(r.code ?? -1) msg=\(r.msg ?? "-")")
+        DYLiveModel.log("DDSEND comment status=\(r.status) code=\(r.code ?? -1) msg=\(r.msg ?? "-") diag=\(r.diagnostic ?? "-")")
         if r.code == 8 { throw DYError.bad("抖音未登录") }
         guard r.status == 200, (r.code ?? 0) == 0, let c = r.comment else {
             throw DYError.bad(r.msg?.isEmpty == false ? r.msg! : "发送失败（HTTP \(r.status) / \(r.code ?? -1)）")
@@ -172,10 +242,18 @@ extension DouyinBridge {
     static let publishJS = cmap + #"""
     const P = q({ app_name: 'aweme', enter_from: 'video_detail', previous_page: 'video_detail' });
     const body = new URLSearchParams({ aweme_id: id, text: text, text_extra: '[]', comment_send_celltime: '0', comment_video_celltime: '0' });
-    if (reply && reply !== '0') { body.set('reply_id', reply); body.set('reply_to_reply_id', '0'); }
+    if (reply && reply !== '0') { body.set('reply_id', reply); body.set('reply_to_reply_id', (replyTo && replyTo !== '0') ? replyTo : '0'); }
     const r = await req('POST', '/aweme/v1/web/comment/publish?' + P, body.toString());
-    const d = parse(r.t) || {};
-    return JSON.stringify({ status: r.s, code: d.status_code ?? null, msg: d.status_msg || (r.s === 200 ? null : (r.t || '').slice(0, 80)), comment: cmap(d.comment), danmakuID: null });
+    const raw = r.t || '', parsed = parse(raw), d = parsed || {};
+    const kind = !raw.trim() ? 'empty' : parsed !== null ? 'json' : /^\s*</.test(raw) ? 'html' : 'other';
+    // 只记录形状，不记录响应正文、评论内容、cookie 或 token；写操作不自动重试。
+    const keys = Object.keys(d).filter(k => /^[a-zA-Z_]+$/.test(k)).slice(0, 12).join(',');
+    const diagnostic = 'kind=' + kind + ' chars=' + raw.length + ' keys=' + keys;
+    const fallback = kind === 'empty' ? '抖音返回空响应，未能确认评论是否发送，请勿连续重发'
+      : kind === 'html' ? '抖音返回了网页而非评论结果，请在网页版查看是否有验证提示'
+      : '未收到有效的评论确认结果，请勿连续重发';
+    const msg = d.status_msg || ((!d.comment || d.status_code !== 0 || r.s !== 200) ? fallback : null);
+    return JSON.stringify({ status: r.s, code: d.status_code ?? null, msg, comment: cmap(d.comment), danmakuID: null, diagnostic });
     """#
 
     static let deleteCommentJS = #"""
@@ -207,7 +285,7 @@ extension DouyinBridge {
 
     private static let userMap = #"""
     const umap = u => u ? ({ name: u.nickname || '', avatar: first(u.avatar_larger) || first(u.avatar_thumb), signature: u.signature || '',
-      secUid: u.sec_uid || '', followers: u.follower_count || u.mplatform_followers_count || 0, following: u.following_count || 0,
+      secUid: u.sec_uid || '', uid: u.uid ? String(u.uid) : '', followers: u.follower_count || u.mplatform_followers_count || 0, following: u.following_count || 0,
       likes: u.total_favorited || 0, works: u.aweme_count || 0, ip: u.ip_location || null }) : null;
     """#
 
@@ -221,6 +299,12 @@ extension DouyinBridge {
     const r = await req('GET', '/aweme/v1/web/user/profile/other/?' + q({ sec_user_id: sec, publish_video_strategy_type: '2', personal_center_strategy: '1' }));
     const d = parse(r.t) || {};
     return JSON.stringify({ status: r.s, user: umap(d.user), msg: d.status_msg || null });
+    """#
+
+    static let postJS = listTail + #"""
+    const r = await req('GET', '/aweme/v1/web/aweme/post/?' + q({ sec_user_id: sec, max_cursor: cursor, locate_query: 'false', show_live_replay_strategy: '1', need_time_list: '1', time_list_query: '0', whale_cut_token: '', cut_version: '1', count: '18' }));
+    const d = parse(r.t) || {};
+    return pack(r, d, d.aweme_list, d.max_cursor, d.has_more);
     """#
 
     static let likeJS = listTail + #"""
@@ -255,12 +339,45 @@ extension DouyinBridge {
     return pack(r, d, arr, d.cursor, d.has_more);
     """#
 
+    static let emojiJS = #"""
+    const r = await req('GET', '/aweme/v1/web/emoji/list/?' + q({}));
+    const d = parse(r.t) || {};
+    const arr = (d.emoji_list || []).filter(e => e && e.display_name && !e.hide)
+      .map(e => ({ displayName: e.display_name, url: ((e.emoji_url || {}).url_list || [])[0] || null }));
+    return JSON.stringify({ status: r.s, items: arr });
+    """#
+
+    static let atListJS = #"""
+    const r = await req('GET', '/aweme/v1/web/familiar/atlist/?' + q({ count: '20', cursor: cursor, scene: 'comment' }));
+    const d = parse(r.t) || {};
+    const arr = (d.user_list || []).filter(u => u).map(u => ({
+      name: u.nickname || '',
+      avatar: first(u.avatar_thumb) || first(u.avatar_168x168) || first(u.avatar_300x300),
+      secUid: u.sec_uid || ''
+    }));
+    return JSON.stringify({ status: r.s, items: arr, cursor: String(d.cursor || 0), hasMore: !!d.has_more });
+    """#
+
+    static let followingJS = #"""
+    const r = await req('GET', '/aweme/v1/web/user/following/list/?' + q({ sec_user_id: sec, count: '30', cursor: cursor, offset: cursor, source_type: '1' }));
+    const d = parse(r.t) || {};
+    const arr = (d.followings || []).filter(u => u).map(u => ({ name: u.nickname || '', avatar: first(u.avatar_thumb) || first(u.avatar_medium), secUid: u.sec_uid || '' }));
+    return JSON.stringify({ status: r.s, items: arr, cursor: String(d.cursor || 0), hasMore: !!d.has_more });
+    """#
+
     static let searchJS = listTail + #"""
     const r = await req('GET', '/aweme/v1/web/search/item/?' + q({ search_channel: 'aweme_video_web', keyword: kw, search_source: 'normal_search',
       query_correct_type: '1', is_filter_search: '0', from_group_id: '', offset: cursor, count: '24', need_filter_settings: cursor === '0' ? '1' : '0', list_type: 'single' }));
     const d = parse(r.t) || {};
     const arr = (d.data || []).map(x => x && (x.aweme_info || x.aweme)).filter(Boolean);
     return pack(r, d, arr, d.cursor, d.has_more);
+    """#
+
+    static let hotJS = #"""
+    const r = await req('GET', '/aweme/v1/web/hot/search/list/?' + q({ detail_list: '1', source: '6', board_type: '0', board_sub_type: '' }));
+    const d = parse(r.t) || {};
+    const wl = ((d.data || {}).word_list) || [];
+    return JSON.stringify(wl.filter(w => w && w.word).map(w => ({ word: w.word, hot: w.hot_value || 0, pos: w.position ?? null })));
     """#
 
     static let sugJS = #"""
@@ -287,9 +404,22 @@ extension DouyinBridge {
       d = parse(r.t);
     }
     if (!d) return JSON.stringify({ status: r.s === 200 ? 403 : r.s, items: [], cursor: 0, hasMore: false, msg: '抖音没返回回复（网页接口受限）' });
+    const ddImg = o => { const u = o && o.url_list && o.url_list[0]; return u ? { u, w: o.width || 0, h: o.height || 0 } : null; };
+    const ddImages = c => (c.image_list || []).map(x => {
+      const m = ddImg(x.medium_url) || ddImg(x.thumb_url) || ddImg(x.crop_url) || ddImg(x.origin_url);
+      const o = ddImg(x.origin_url) || m;
+      return m ? { thumb: m.u, full: o.u, w: o.w || m.w, h: o.h || m.h } : null;
+    }).filter(Boolean);
+    const ddSticker = c => {
+      const s = c.sticker; if (!s) return null;
+      const st = ddImg(s.static_url) || ddImg(s.animate_url); if (!st) return null;
+      const an = ddImg(s.animate_url) || st;
+      return { thumb: st.u, full: an.u, w: s.width || st.w, h: s.height || st.h };
+    };
     const items = (d.comments || []).map(c => ({
       id: String(c.cid), text: c.text || '', name: (c.user && c.user.nickname) || '', avatar: c.user && first(c.user.avatar_thumb),
-      digg: c.digg_count || 0, time: c.create_time || 0, replies: 0, ip: c.ip_label || null }));
+      digg: c.digg_count || 0, time: c.create_time || 0, replies: 0, ip: c.ip_label || null,
+      images: ddImages(c), sticker: ddSticker(c) }));
     return JSON.stringify({ status: r.s, items, cursor: d.cursor || 0, hasMore: !!d.has_more, msg: null });
     """#
 }
@@ -300,41 +430,208 @@ extension DouyinBridge {
     static var time: Double = 0
 }
 
+// MARK: - 弹幕调度策略
+
+/// 仅影响视频滚动弹幕：上方三分之一、密度限流与短时间相同内容去重。
+fileprivate enum DYDanmakuPolicy {
+    static let laneHeight: CGFloat = 28
+    static let gap: CGFloat = 28
+    static let densityKey = "douyin_video_danmaku_density_v1"
+    static let deduplicateKey = "douyin_video_danmaku_deduplicate_v1"
+
+    enum Density: Int, CaseIterable, Identifiable {
+        case sparse = 0, standard = 1, dense = 2
+        var id: Int { rawValue }
+        var title: String {
+            switch self { case .sparse: "稀疏"; case .standard: "标准"; case .dense: "密集" }
+        }
+        var maxLanes: Int {
+            switch self { case .sparse: 2; case .standard: 4; case .dense: 6 }
+        }
+        var maxPerSecond: Int {
+            switch self { case .sparse: 1; case .standard: 2; case .dense: 4 }
+        }
+    }
+    struct Region { let top: CGFloat; let bottom: CGFloat; let lanes: Int }
+    struct Placed { let d: DYDanmaku; let lane: Int; let width: CGFloat; let dur: Double }
+
+    static func region(height: CGFloat, topInset: CGFloat, density: Density) -> Region {
+        guard height.isFinite, height >= 0, topInset.isFinite else { return Region(top: 0, bottom: 0, lanes: 0) }
+        let bottom = height / 3
+        let top = max(0, topInset) + 64
+        let available = max(0, ((bottom - top) / laneHeight).rounded(.down))
+        return Region(top: top, bottom: bottom, lanes: Int(min(CGFloat(density.maxLanes), available)))
+    }
+
+    static func normalized(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .widthInsensitive], locale: Locale(identifier: "zh_CN"))
+            .split(whereSeparator: { $0.isWhitespace }).joined()
+    }
+
+    static func layout(_ items: [DYDanmaku], w: CGFloat, lanes: Int, speed: CGFloat,
+                       density: Density, deduplicate: Bool) -> [Placed] {
+        guard w.isFinite, w > 0, speed.isFinite, speed > 0, lanes > 0 else { return [] }
+        var free = Array(repeating: -Double.infinity, count: min(lanes, density.maxLanes))
+        var out: [Placed] = []
+        var seenIDs = Set<String>(), lastShown: [String: Double] = [:]
+        var second = -Double.infinity, inSecond = 0
+        let sorted = items.enumerated().filter { $0.element.offset.isFinite && $0.element.offset >= 0 }
+            .sorted { $0.element.offset == $1.element.offset ? $0.offset < $1.offset : $0.element.offset < $1.element.offset }
+        for entry in sorted {
+            let d = entry.element
+            let text = normalized(d.text)
+            guard !d.id.isEmpty, !text.isEmpty, !seenIDs.contains(d.id) else { continue }
+            if deduplicate, let last = lastShown[text], d.offset - last < 10 { continue }
+            let bucket = floor(d.offset)
+            if bucket != second { second = bucket; inSecond = 0 }
+            guard inSecond < density.maxPerSecond,
+                  let lane = free.indices.first(where: { free[$0] <= d.offset }) else { continue }
+            let width = d.text.unicodeScalars.reduce(CGFloat(6)) { $0 + ($1.value < 0x2E80 ? 9 : 16) }
+            free[lane] = d.offset + Double((width + gap) / speed)
+            out.append(Placed(d: d, lane: lane, width: width, dur: Double((w + width) / speed)))
+            seenIDs.insert(d.id); lastShown[text] = d.offset; inSecond += 1
+        }
+        return out
+    }
+}
+
+/// 共用在推荐、关注、搜索等视频的更多菜单，不给巨型视频页新增状态。
+struct DYDanmakuOptions: View {
+    var onSend: (() -> Void)? = nil
+    @AppStorage("douyin_danmaku_v1") private var enabled = true
+    @AppStorage(DYDanmakuPolicy.densityKey) private var density = DYDanmakuPolicy.Density.standard.rawValue
+    @AppStorage(DYDanmakuPolicy.deduplicateKey) private var deduplicate = true
+
+    var body: some View {
+        Menu {
+            if let onSend {
+                Button("发弹幕", systemImage: "text.bubble", action: onSend)
+                    .accessibilityIdentifier("douyin.danmaku.open")
+            }
+            Toggle("显示弹幕", isOn: $enabled)
+                .accessibilityIdentifier("douyin.danmaku.enabled")
+            Picker("弹幕密度", selection: $density) {
+                ForEach(DYDanmakuPolicy.Density.allCases) { option in Text(option.title).tag(option.rawValue) }
+            }
+            .accessibilityIdentifier("douyin.danmaku.density")
+            Toggle("10秒内重复去重", isOn: $deduplicate)
+                .accessibilityIdentifier("douyin.danmaku.deduplicate")
+            Text("显示区域：屏幕上方 1/3")
+        } label: {
+            Label("弹幕 · \((DYDanmakuPolicy.Density(rawValue: density) ?? .standard).title)", systemImage: "text.bubble")
+        }
+        .accessibilityIdentifier("douyin.danmaku.settings")
+        .accessibilityValue("\((DYDanmakuPolicy.Density(rawValue: density) ?? .standard).title)，去重\(deduplicate ? "开启" : "关闭")")
+    }
+}
+
 // MARK: - 弹幕层（视频）
 
-/// 抖音同款滚动弹幕：按 offset 时间从右往左飘，分 5 条轨道
+/// 弹幕时钟：播放器每 0.25 秒报一次进度，弹幕按帧插值出「现在」的视频时间，否则位置一跳一跳。
+/// 播放器报一次就校准一次（锚点 = 报的时间 + 报的时刻），中间按播放速率往前推。
+struct DYDanmakuClock {
+    var anchorTime: Double = 0
+    var anchorDate = Date()
+    var rate: Double = 1
+    var playing = false
+
+    func now(_ d: Date) -> Double {
+        playing ? anchorTime + d.timeIntervalSince(anchorDate) * rate : anchorTime
+    }
+
+    mutating func sync(_ t: Double, playing p: Bool, rate r: Double) {
+        let predicted = now(Date())
+        // 进度跳了（拖动 / 循环回开头 / 卡顿）或状态变了：直接对齐；否则差不多就别动，避免往回抖
+        if !p || !playing || r != rate || abs(predicted - t) > 0.35 {
+            anchorTime = t
+        } else {
+            anchorTime = predicted + (t - predicted) * 0.2   // 小误差慢慢拉回
+        }
+        anchorDate = Date()
+        playing = p
+        rate = r
+    }
+}
+
+/// 抖音同款滚动弹幕：所有弹幕同一速度从右往左飘（同速 → 同一轨道里后面的永远追不上前面的）。
+/// 轨道按「前一条尾巴已经完全进屏 + 间距」分配，整条视频一次排好（布局只在弹幕列表 / 屏幕宽变化时重算）；
+/// 某个时刻所有轨道都满就丢掉这一条（抖音也是这样）。
+/// 位置用 TimelineView(.animation) 逐帧算（跟屏幕刷新率走，ProMotion 上 120Hz），不靠 SwiftUI 补间动画。
 struct DYDanmakuLayer: View {
     let items: [DYDanmaku]
-    let time: Double
+    let clock: DYDanmakuClock
     let topInset: CGFloat
-    private static let lanes = 5
-    private static let travel: Double = 8      // 一条弹幕飘过屏幕用时（秒）
+    @AppStorage(DYDanmakuPolicy.densityKey) private var densityRaw = DYDanmakuPolicy.Density.standard.rawValue
+    @AppStorage(DYDanmakuPolicy.deduplicateKey) private var deduplicate = true
+
+    private var renderItems: [DYDanmaku] {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["DOUDUO_DM_STRESS"] == "1" {
+            return (0..<600).map { DYDanmaku(id: "stress-\($0)", text: "弹幕流畅度测试 \($0)", offset: Double($0) * 0.15) }
+        }
+        #endif
+        return items
+    }
 
     var body: some View {
         GeometryReader { g in
             let w = g.size.width
-            ZStack(alignment: .topLeading) {
-                ForEach(Array(visible.enumerated()), id: \.element.id) { idx, d in
-                    let p = (time - d.offset) / Self.travel          // 0 → 1
-                    let lane = abs(d.id.hashValue) % Self.lanes
-                    Text(d.text)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .shadow(color: .black.opacity(0.7), radius: 1.5, y: 1)
-                        .lineLimit(1)
-                        .fixedSize()
-                        .offset(x: w - CGFloat(p) * (w + 260), y: topInset + 64 + CGFloat(lane) * 28)
+            let density = DYDanmakuPolicy.Density(rawValue: densityRaw) ?? .standard
+            let region = DYDanmakuPolicy.region(height: g.size.height, topInset: topInset, density: density)
+            let speed = (w + 200) / 7
+            let placed = DYDanmakuLayout.shared.get(renderItems, w: w, lanes: region.lanes, speed: speed,
+                                                  density: density, deduplicate: deduplicate)
+            TimelineView(.animation(minimumInterval: nil, paused: !clock.playing)) { ctx in
+                let t = clock.now(ctx.date)
+                Canvas(rendersAsynchronously: false) { gc, _ in
+                    var regionContext = gc
+                    regionContext.clip(to: Path(CGRect(x: 0, y: region.top, width: w, height: max(0, region.bottom - region.top))))
+                    for p in placed where t >= p.d.offset && t <= p.d.offset + p.dur {
+                        let x = w - CGFloat(t - p.d.offset) * speed
+                        let y = region.top + CGFloat(p.lane) * DYDanmakuPolicy.laneHeight
+                        guard let sym = regionContext.resolveSymbol(id: p.d.id) else { continue }
+                        regionContext.draw(sym, at: CGPoint(x: x, y: y), anchor: .topLeading)
+                    }
+                } symbols: {
+                    // 只排版一次，逐帧移动贴图；区域外再裁剪，避免遮挡下方内容。
+                    ForEach(placed, id: \.d.id) { p in
+                        Text(p.d.text)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.92))
+                            .shadow(color: .black.opacity(0.7), radius: 1.5, y: 1)
+                            .lineLimit(1)
+                            .fixedSize()
+                            .tag(p.d.id)
+                    }
                 }
             }
-            .frame(width: w, height: g.size.height, alignment: .topLeading)
-            .clipped()
-            .animation(.linear(duration: 0.25), value: time)
+            .frame(width: w, height: g.size.height)
         }
         .allowsHitTesting(false)
     }
+}
 
-    private var visible: [DYDanmaku] {
-        items.filter { time >= $0.offset && time <= $0.offset + Self.travel }.prefix(18).map { $0 }
+/// 精确缓存输入和设置：中间一条内容变化、密度/去重切换均立即重排。
+@MainActor private final class DYDanmakuLayout {
+    static let shared = DYDanmakuLayout()
+    private struct Key: Equatable {
+        let items: [DYDanmaku]
+        let w: CGFloat
+        let lanes: Int
+        let speed: CGFloat
+        let density: DYDanmakuPolicy.Density
+        let deduplicate: Bool
+    }
+    private var key: Key?
+    private var cache: [DYDanmakuPolicy.Placed] = []
+    func get(_ items: [DYDanmaku], w: CGFloat, lanes: Int, speed: CGFloat,
+             density: DYDanmakuPolicy.Density, deduplicate: Bool) -> [DYDanmakuPolicy.Placed] {
+        let next = Key(items: items, w: w, lanes: lanes, speed: speed, density: density, deduplicate: deduplicate)
+        if key != next {
+            cache = DYDanmakuPolicy.layout(items, w: w, lanes: lanes, speed: speed, density: density, deduplicate: deduplicate)
+            key = next
+        }
+        return cache
     }
 }
 
@@ -345,7 +642,7 @@ enum DYSaver {
         case denied, noURL
         var errorDescription: String? {
             switch self {
-            case .denied: "没有相册权限：设置 → 抖Duo → 照片 → 允许添加"
+            case .denied: "没有相册权限：设置 → DouDuo → 照片 → 允许添加"
             case .noURL: "这条没有可下载的地址"
             }
         }
@@ -390,26 +687,40 @@ struct DYGrid: View {
     let error: String?
     let onLoadMore: () -> Void
     let onOpen: (Int) -> Void
+    var showsPlayCount = false
     private let cols = [GridItem(.adaptive(minimum: 140), spacing: 2)]
 
     var body: some View {
-        ScrollView {
-            LazyVGrid(columns: cols, spacing: 2) {
-                ForEach(Array(items.enumerated()), id: \.element.id) { i, a in
-                    Button { onOpen(i) } label: { cell(a) }
-                        .buttonStyle(.plain)
-                        .onAppear { if i >= items.count - 6 { onLoadMore() } }
+        // 底部哨兵只在真正滚进可视区时才翻页：ScrollView 的非惰性子视图会立刻 onAppear，
+        // 直接 onAppear 会一页接一页把作者作品全拉下来（2026-11-07 实测）。
+        GeometryReader { outer in
+            ScrollView {
+                LazyVGrid(columns: cols, spacing: 2) {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { i, a in
+                        Button { onOpen(i) } label: { cell(a) }
+                            .buttonStyle(.plain)
+                    }
+                }
+                if let error {
+                    Text(error).font(.footnote).foregroundStyle(.white.opacity(0.75))
+                        .multilineTextAlignment(.center).padding(24)
+                } else if loading {
+                    ProgressView().tint(.white).padding(24)
+                } else if items.isEmpty {
+                    Text("这里还没有内容").font(.footnote).foregroundStyle(.white.opacity(0.6)).padding(40)
+                } else if hasMore {
+                    Color.clear
+                        .frame(height: 40)
+                        .background(
+                            GeometryReader { g in
+                                Color.clear.preference(key: DYBottomYKey.self, value: g.frame(in: .named("ddgrid")).minY)
+                            }
+                        )
                 }
             }
-            if let error {
-                Text(error).font(.footnote).foregroundStyle(.white.opacity(0.75))
-                    .multilineTextAlignment(.center).padding(24)
-            } else if loading {
-                ProgressView().tint(.white).padding(24)
-            } else if items.isEmpty {
-                Text("这里还没有内容").font(.footnote).foregroundStyle(.white.opacity(0.6)).padding(40)
-            } else if hasMore {
-                Color.clear.frame(height: 40).onAppear(perform: onLoadMore)
+            .coordinateSpace(name: "ddgrid")
+            .onPreferenceChange(DYBottomYKey.self) { y in
+                if y < outer.size.height - 16 { onLoadMore() }
             }
         }
     }
@@ -433,7 +744,11 @@ struct DYGrid: View {
                     if !a.desc.isEmpty {
                         Text(a.desc).font(.caption2).lineLimit(2)
                     }
-                    Label(DYFormat.count(a.stats.digg), systemImage: "heart").font(.caption2.weight(.semibold))
+                    Label(showsPlayCount ? a.stats.play.map(DYFormat.count) ?? "—" : DYFormat.count(a.stats.digg),
+                          systemImage: showsPlayCount ? "play" : "heart")
+                        .font(.caption2.weight(.semibold))
+                        .accessibilityLabel(showsPlayCount ? "播放量 \(a.stats.play.map(String.init) ?? "未提供")" : "点赞量 \(a.stats.digg)")
+                        .accessibilityIdentifier(showsPlayCount ? "douyin.grid.playCount" : "douyin.grid.likeCount")
                 }
                 .foregroundStyle(.white)
                 .shadow(color: .black.opacity(0.8), radius: 2)
@@ -443,6 +758,11 @@ struct DYGrid: View {
             }
             .contentShape(Rectangle())
     }
+}
+
+private struct DYBottomYKey: PreferenceKey {
+    static var defaultValue: CGFloat = .greatestFiniteMagnitude
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = min(value, nextValue()) }
 }
 
 // MARK: - 列表播放器（从网格点进来，上下滑接着看）
@@ -462,10 +782,15 @@ struct DYListPlayer: View {
     @State private var showComments = false
     @State private var toast: String?
     @State private var loadingMore = false
+    /// 从消息点评论进来：自动开评论区并定位那条评论
+    let commentFocus: DYCommentFocus?
 
     init(bridge: DouyinBridge, title: String, items: [DYAweme], start: Int,
-         loadMore: (() async -> [DYAweme])? = nil, onAuthor: @escaping (DYAweme) -> Void) {
+         loadMore: (() async -> [DYAweme])? = nil, onAuthor: @escaping (DYAweme) -> Void,
+         commentFocus: DYCommentFocus? = nil) {
         self.bridge = bridge; self.title = title
+        self.commentFocus = commentFocus
+        _showComments = State(initialValue: commentFocus != nil)
         _items = State(initialValue: items)
         _currentID = State(initialValue: items.indices.contains(start) ? items[start].id : items.first?.id)
         self.loadMore = loadMore; self.onAuthor = onAuthor
@@ -488,9 +813,10 @@ struct DYListPlayer: View {
                                         onLike: { toggleLike(item.id, force: nil) }, onCollect: { toggleCollect(item.id) },
                                         onDoubleTap: { toggleLike(item.id, force: true) },
                                         onComments: { showComments = true },
+                                        onSearch: {},
                                         onAuthor: { onAuthor(item) },
                                         onSavePosition: { resume[item.id] = $0 }, preloader: preloader,
-                                        bridge: bridge, onToast: { show($0) })
+                                        bridge: bridge, onToast: { show($0) }, onBack: { dismiss() })
                                 .containerRelativeFrame([.horizontal, .vertical])
                                 .id(item.id)
                         }
@@ -502,15 +828,6 @@ struct DYListPlayer: View {
                 .scrollIndicators(.hidden)
                 .ignoresSafeArea()
 
-                HStack(spacing: 10) {
-                    Button { dismiss() } label: {
-                        Image(systemName: "chevron.left").font(.headline.weight(.semibold)).foregroundStyle(.white)
-                            .frame(width: 40, height: 40).background(Circle().fill(.black.opacity(0.35)))
-                    }
-                    .accessibilityIdentifier("douyin.list.back")
-                    Text(title).font(.headline).foregroundStyle(.white).shadow(radius: 3)
-                }
-                .padding(.leading, 10).padding(.top, 6)
 
                 if let t = toast {
                     Text(t).font(.footnote.weight(.medium)).foregroundStyle(.white)
@@ -522,12 +839,12 @@ struct DYListPlayer: View {
             }
             .sheet(isPresented: $showComments) {
                 if let cur = current {
-                    DYCommentPanel(bridge: bridge, aweme: cur, onClose: { showComments = false })
-                        .presentationDetents([.fraction(0.62), .large])
+                    DYCommentPanel(bridge: bridge, aweme: cur, onClose: { showComments = false }, focus: commentFocus)
+                        // 竖屏锁死半屏：不给 .large，上滑不能把评论区撑满整屏
+                        .presentationDetents([.fraction(0.62)])
                 }
             }
         }
-        .statusBarHidden(true)
         .onChange(of: currentID) { old, new in
             if new == nil, let old { currentID = old; return }
             guard let i = items.firstIndex(where: { $0.id == new }) else { return }
@@ -627,9 +944,11 @@ struct DYListTarget: Identifiable {
 struct DYSearchScreen: View {
     let bridge: DouyinBridge
     let onAuthor: (DYAweme) -> Void
+    var initialQuery: String = ""
     @Environment(\.dismiss) private var dismiss
     @State private var kw = ""
     @State private var sugs: [DYSug] = []
+    @State private var hot: [DYHot] = []
     @State private var model: DYPagedModel?
     @State private var open: DYListTarget?
     @State private var sugTask: Task<Void, Never>?
@@ -696,13 +1015,19 @@ struct DYSearchScreen: View {
                             FlowTags(tags: history) { w in kw = w; run(w) }
                                 .padding(.horizontal, 16)
                         }
+                        if !hot.isEmpty && (sugs.isEmpty || kw.isEmpty) {
+                            hotSection
+                        }
                     }
                 }
             }
         }
         .background(Color.black.ignoresSafeArea())
+        .task { if hot.isEmpty { hot = await bridge.hotSearch() } }
         .onAppear {
-            focused = true
+            if !initialQuery.isEmpty {
+                if lastRun.isEmpty { run(initialQuery) }
+            } else { focused = true }
             #if DEBUG
             if let w = ProcessInfo.processInfo.environment["DOUDUO_SEARCHKW"] { run(w) }
             else if ProcessInfo.processInfo.environment["DOUDUO_SEARCHCAT"] == "1" { run("猫") }
@@ -724,6 +1049,39 @@ struct DYSearchScreen: View {
             DYListPlayer(bridge: bridge, title: t.title, items: t.items, start: t.start,
                          loadMore: t.model.map { m in { await m.loadMore() } }, onAuthor: onAuthor)
         }
+    }
+
+    /// 抖音热搜：宽屏自动两列
+    private var hotSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("抖音热搜").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                .padding(.top, 20)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 24, alignment: .leading)],
+                      alignment: .leading, spacing: 0) {
+                ForEach(Array(hot.enumerated()), id: \.offset) { _, h in
+                    Button { kw = h.word; run(h.word) } label: { hotRow(h) }.buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 24)
+    }
+
+    private func hotRow(_ h: DYHot) -> some View {
+        let accent = Color(red: 1, green: 0.42, blue: 0.32)
+        return HStack(spacing: 10) {
+            Group {
+                if let p = h.pos { Text("\(p)").foregroundStyle(p <= 3 ? accent : .white.opacity(0.45)) }
+                else { Image(systemName: "pin.fill").foregroundStyle(accent) }
+            }
+            .font(.subheadline.weight(.bold).monospacedDigit())
+            .frame(width: 26)
+            Text(h.word).font(.subheadline).foregroundStyle(.white).lineLimit(1)
+            Spacer(minLength: 6)
+            if h.hot > 0 { Text(DYFormat.count(h.hot)).font(.caption).foregroundStyle(.white.opacity(0.4)) }
+        }
+        .padding(.vertical, 10)
+        .contentShape(Rectangle())
     }
 
     private func run(_ word: String) {
@@ -798,27 +1156,38 @@ struct DYMineScreen: View {
     let bridge: DouyinBridge
     let onLogin: () -> Void
     let onAuthor: (DYAweme) -> Void
+    var onMessages: (() -> Void)? = nil
+    var onClose: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var user: DYUser?
     @State private var userErr: String?
-    @State private var kind: DYListKind = .like
+    @State private var kind: DYListKind = .post
     @State private var models: [DYListKind: DYPagedModel] = [:]
     @State private var open: DYListTarget?
+    @State private var relations: DYRelationsTarget?
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Button { dismiss() } label: {
-                    Image(systemName: "chevron.left").font(.headline.weight(.semibold)).foregroundStyle(.white)
-                        .frame(width: 40, height: 40)
+        NavigationStack {
+            content
+                .navigationTitle(user?.name ?? "我的")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    // Duo：返回 + 操作走系统 toolbar，系统放进右侧竖向侧栏（每项都有标题+符号）
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("返回", systemImage: "chevron.backward") { if let onClose { onClose() } else { dismiss() } }
+                            .accessibilityIdentifier("douyin.mine.back")
+                    }
+                    ToolbarItem(placement: .primaryAction) {
+                        Button("网页版 / 登录", systemImage: "safari") { onLogin() }
+                    }
                 }
-                .accessibilityIdentifier("douyin.mine.back")
-                Spacer()
-                Button("网页版 / 登录", systemImage: "safari") { onLogin() }
-                    .font(.footnote).foregroundStyle(.white.opacity(0.8))
-            }
-            .padding(.horizontal, 8)
+        }
+        .preferredColorScheme(.dark)
+        .modifier(DYEdgeSwipeBack(action: { if let onClose { onClose() } else { dismiss() } }))
+    }
 
+    private var content: some View {
+        VStack(spacing: 0) {
             header.padding(.horizontal, 16).padding(.bottom, 12)
 
             HStack(spacing: 22) {
@@ -837,7 +1206,7 @@ struct DYMineScreen: View {
             .padding(.bottom, 6)
 
             if let m = models[kind] {
-                DYMineList(model: m) { i in
+                DYMineList(model: m, showsPlayCount: kind == .post) { i in
                     open = DYListTarget(title: kind.title, items: m.items, start: i, model: m)
                 }
                 .id(kind)
@@ -853,6 +1222,9 @@ struct DYMineScreen: View {
             DYListPlayer(bridge: bridge, title: t.title, items: t.items, start: t.start,
                          loadMore: t.model.map { m in { await m.loadMore() } }, onAuthor: onAuthor)
         }
+        .fullScreenCover(item: $relations) { t in
+            DYRelationsScreen(bridge: bridge, kind: t.kind, uid: t.user.uid, secUid: t.user.secUid)
+        }
     }
 
     private func ensure(_ k: DYListKind) {
@@ -865,7 +1237,9 @@ struct DYMineScreen: View {
     @ViewBuilder
     private var header: some View {
         if let u = user {
-            DYUserHeader(user: u)
+            DYUserHeader(user: u,
+                         onFollowing: { relations = DYRelationsTarget(kind: .following, user: u) },
+                         onFollowers: { relations = DYRelationsTarget(kind: .followers, user: u) })
         } else if let e = userErr {
             VStack(spacing: 10) {
                 Text(e.contains("未登录") ? "还没登录抖音" : e).foregroundStyle(.white.opacity(0.8)).font(.subheadline)
@@ -880,15 +1254,19 @@ struct DYMineScreen: View {
 
 private struct DYMineList: View {
     @ObservedObject var model: DYPagedModel
+    var showsPlayCount = false
     let onOpen: (Int) -> Void
     var body: some View {
         DYGrid(items: model.items, hasMore: model.hasMore, loading: model.loading, error: model.error,
-               onLoadMore: { Task { await model.loadMore() } }, onOpen: onOpen)
+               onLoadMore: { Task { await model.loadMore() } }, onOpen: onOpen, showsPlayCount: showsPlayCount)
     }
 }
 
 struct DYUserHeader: View {
     let user: DYUser
+    /// 「关注 / 粉丝」数字可点（传了回调才显示为按钮）；不传保持纯展示，作者页不受影响
+    var onFollowing: (() -> Void)? = nil
+    var onFollowers: (() -> Void)? = nil
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 14) {
@@ -903,7 +1281,10 @@ struct DYUserHeader: View {
                 }
             }
             HStack(spacing: 20) {
-                stat(user.likes, "获赞"); stat(user.following, "关注"); stat(user.followers, "粉丝"); stat(user.works, "作品")
+                stat(user.likes, "获赞")
+                statTap(user.following, "关注", onFollowing, "douyin.header.following")
+                statTap(user.followers, "粉丝", onFollowers, "douyin.header.followers")
+                stat(user.works, "作品")
             }
             if !user.signature.isEmpty {
                 Text(user.signature).font(.footnote).foregroundStyle(.white.opacity(0.75)).lineLimit(3)
@@ -917,9 +1298,21 @@ struct DYUserHeader: View {
             Text(t).font(.caption).foregroundStyle(.white.opacity(0.6))
         }
     }
+    private func statTap(_ n: Int, _ t: String, _ act: (() -> Void)?, _ id: String) -> some View {
+        Button { act?() } label: {
+            HStack(spacing: 4) {
+                Text(DYFormat.count(n)).font(.subheadline.weight(.bold)).foregroundStyle(.white)
+                Text(t).font(.caption).foregroundStyle(.white.opacity(0.6))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(act == nil)
+        .accessibilityIdentifier(id)
+    }
 }
 
-// MARK: - 作者主页（原生资料卡；作品列表网页接口签名受限 → 按钮跳网页版看全部作品）
+// MARK: - 作者主页（资料卡 + 原生作品网格；网页版只作兜底）
 
 struct DYAuthorScreen: View {
     let bridge: DouyinBridge
@@ -928,9 +1321,19 @@ struct DYAuthorScreen: View {
     @Environment(\.dismiss) private var dismiss
     @State private var user: DYUser?
     @State private var err: String?
+    @State private var posts: [DYAweme] = []
+    @State private var cursor = "0"
+    @State private var hasMore = true
+    @State private var loading = false
+    @State private var postErr: String?
+    @State private var followed = false
+    @State private var followUID: String?
+    @State private var followBusy = false
+    @State private var followMsg: String?
+    @State private var player: DYAuthorPlay?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Button { dismiss() } label: {
                     Image(systemName: "chevron.left").font(.headline.weight(.semibold)).foregroundStyle(.white)
@@ -938,46 +1341,153 @@ struct DYAuthorScreen: View {
                 }
                 .accessibilityIdentifier("douyin.author.back")
                 Spacer()
+                followButton
             }
             if let u = user {
                 DYUserHeader(user: u)
             } else if let err {
                 Text(err).foregroundStyle(.white.opacity(0.7)).font(.footnote)
             } else {
-                ProgressView().tint(.white).frame(maxWidth: .infinity, minHeight: 100)
+                ProgressView().tint(.white).frame(maxWidth: .infinity, minHeight: 72)
             }
             if let s = author.secUid, let u = URL(string: "https://www.douyin.com/user/\(s)") {
                 Button {
                     dismiss()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onWeb(u) }
                 } label: {
-                    Label("查看全部作品", systemImage: "square.grid.3x3")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                        .frame(maxWidth: .infinity).frame(height: 44)
-                        .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.14)))
+                    Text("网页版")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.7))
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("douyin.author.web")
             }
-            Spacer()
+            if let followMsg {
+                Text(followMsg).font(.caption2).foregroundStyle(.orange)
+            }
+            DYGrid(items: posts, hasMore: hasMore, loading: loading, error: postErr, onLoadMore: { requestMore() }, onOpen: { i in
+                player = DYAuthorPlay(index: i)
+            })
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilityIdentifier("douyin.author.works")
         }
         .padding(.horizontal, 16)
+        .padding(.top, 8)
         .background(Color.black.ignoresSafeArea())
+        .fullScreenCover(item: $player) { p in
+            DYListPlayer(bridge: bridge, title: author.name.isEmpty ? "作品" : author.name, items: posts, start: p.index,
+                         loadMore: { await loadPosts() }, onAuthor: { _ in })
+        }
         .task {
-            guard let s = author.secUid else { err = "没有作者信息"; return }
-            do { user = try await bridge.userProfile(s) } catch { err = error.localizedDescription }
+            guard let s = author.secUid else { err = "没有作者信息"; hasMore = false; return }
+            async let profile: Void = loadProfile(s)
+            async let state: Void = loadFollow(s)
+            _ = await (profile, state)
+            _ = await loadPosts()
         }
     }
+
+    @ViewBuilder
+    private var followButton: some View {
+        let uid = followUID ?? author.uid
+        Button { Task { await toggleFollow() } } label: {
+            Text(followBusy ? "…" : (followed ? "已关注" : "关注"))
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(followed ? .white : .black)
+                .padding(.horizontal, 14)
+                .frame(height: 32)
+                .background(Capsule().fill(followed ? Color.white.opacity(0.16) : Color.white))
+        }
+        .buttonStyle(.plain)
+        .disabled(followBusy || uid == nil || uid?.isEmpty == true)
+        .accessibilityIdentifier("douyin.author.follow")
+    }
+
+    private func loadProfile(_ sec: String) async {
+        do { user = try await bridge.userProfile(sec) } catch { err = error.localizedDescription }
+    }
+
+    private func loadFollow(_ sec: String) async {
+        if let s = try? await bridge.followState(sec: sec) {
+            followed = s.followed
+            if let uid = s.uid, !uid.isEmpty { followUID = uid }
+        }
+    }
+
+    private func requestMore() {
+        guard !loading, hasMore, author.secUid != nil else { return }
+        loading = true
+        Task { _ = await loadPosts(alreadyLocked: true) }
+    }
+
+    private func loadPosts(alreadyLocked: Bool = false) async -> [DYAweme] {
+        guard hasMore, let sec = author.secUid else { return [] }
+        if !alreadyLocked {
+            guard !loading else { return [] }
+            loading = true
+        }
+        defer { loading = false }
+        do {
+            let r = try await bridge.userPosts(sec, cursor: cursor)
+            let seen = Set(posts.map(\.id))
+            let fresh = r.items.filter { !seen.contains($0.id) }
+            posts.append(contentsOf: fresh)
+            hasMore = r.hasMore && !r.items.isEmpty && r.cursor != cursor
+            cursor = r.cursor
+            postErr = nil
+            DYLiveModel.log("DDPOST sec=\(sec.prefix(8)) n=\(fresh.count) more=\(hasMore)")
+            return fresh
+        } catch {
+            postErr = error.localizedDescription
+            hasMore = false
+            DYLiveModel.log("DDPOST error \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    /// 只在按钮点击时发关注。不要在测试里点。
+    private func toggleFollow() async {
+        guard let uid = followUID ?? author.uid, !uid.isEmpty, !followBusy else { return }
+        followBusy = true
+        defer { followBusy = false }
+        let want = !followed
+        do {
+            switch try await bridge.followUser(uid, follow: want) {
+            case .ok:
+                followed = want
+                followMsg = nil
+            case .notLoggedIn:
+                followMsg = "抖音未登录"
+            case .failed(let why):
+                followMsg = why
+            }
+        } catch {
+            followMsg = error.localizedDescription
+        }
+    }
+}
+
+private struct DYAuthorPlay: Identifiable {
+    let id = UUID()
+    let index: Int
 }
 
 // MARK: - 关注流
 
 struct DYFollowFeed: View {
-    let bridge: DouyinBridge
+    @ObservedObject var bridge: DouyinBridge
     let insets: EdgeInsets
     let active: Bool
     let onAuthor: (DYAweme) -> Void
     let onLogin: () -> Void
     let onToast: (String) -> Void
+    var onLive: (DYLiveRoom) -> Void = { _ in }
+    @Environment(\.horizontalSizeClass) private var hSize
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var scheme
+    @State private var liveNow: [DYLiveRoom] = []
+    @State private var liveNowTicket = 0
+    @State private var livePick = DYFollowSelection()
     @StateObject private var model: DYPagedModelHolder = DYPagedModelHolder()
     @State private var currentID: String?
     @State private var preloader = DYPreloader()
@@ -1015,6 +1525,7 @@ struct DYFollowFeed: View {
                                         collected: collected.contains(item.id) || item.isCollect == 1,
                                         onLike: { like(item.id, force: nil) }, onCollect: { collect(item.id) },
                                         onDoubleTap: { like(item.id, force: true) }, onComments: { showComments = true },
+                                        onSearch: {},
                                         onAuthor: { onAuthor(item) }, onSavePosition: { resume[item.id] = $0 },
                                         preloader: preloader, bridge: bridge, onToast: onToast)
                                 .containerRelativeFrame([.horizontal, .vertical])
@@ -1029,13 +1540,18 @@ struct DYFollowFeed: View {
                 .ignoresSafeArea()
             }
         }
+        .overlay(alignment: .top) {
+            if !liveNow.isEmpty { liveRow.padding(.top, (hSize == .regular ? 20 : 80) + 52) }
+        }
         .sheet(isPresented: $showComments) {
             if let cur = m.items.first(where: { $0.id == currentID }) {
                 DYCommentPanel(bridge: bridge, aweme: cur, onClose: { showComments = false })
-                    .presentationDetents([.fraction(0.62), .large])
+                    // 竖屏锁死半屏：不给 .large，上滑不能把评论区撑满整屏
+                    .presentationDetents([.fraction(0.62)])
             }
         }
         .task {
+            Task { await loadLiveNow() }
             if m.items.isEmpty { await m.loadMore() }
             if currentID == nil { currentID = m.items.first?.id }
         }
@@ -1045,8 +1561,95 @@ struct DYFollowFeed: View {
             preloader.update(m.items, current: i)
             if i >= m.items.count - 4 { Task { await m.loadMore() } }
         }
-        .onChange(of: active) { _, a in if !a { preloader.clear() } }
-        .onDisappear { preloader.clear() }
+        .onChange(of: active) { _, a in if !a { preloader.clear() } else { Task { await loadLiveNow() } } }
+        .onChange(of: bridge.followSession) { _, _ in
+            liveNow = []
+            if active { Task { await loadLiveNow() } }
+        }
+        .onDisappear {
+            preloader.clear()
+            var pick = livePick
+            pick.cancel()
+            livePick = pick
+        }
+    }
+
+    private func loadLiveNow() async {
+        liveNowTicket += 1
+        let ticket = liveNowTicket
+        let session = bridge.followSession
+        let result = await bridge.followLiveResult()
+        guard ticket == liveNowTicket, session == bridge.followSession else { return }
+        liveNow = DYFollowAvatarPolicy.liveNow(stale: result.stale, kind: result.kind, items: result.items)
+    }
+
+    /// 头像条和直播页列表共用同一份元数据。点某一位时才补这一间的播放地址。
+    private func openLive(_ room: DYLiveRoom) {
+        var pick = livePick
+        let ticket = pick.begin(roomID: room.id, webRid: room.webRid, hasStream: !room.liveStreams.isEmpty)
+        livePick = pick
+        guard room.liveStreams.isEmpty else {
+            DYLiveModel.log("DDFOLLOWPLAY outcome=ready reused=1 detailRequests=0 elapsed=0.000")
+            onLive(room)
+            return
+        }
+        guard !room.webRid.isEmpty else {
+            onToast(DYFollowSelectionFailure.unavailable.message)
+            return
+        }
+        let started = ProcessInfo.processInfo.systemUptime
+        Task {
+            let result = await bridge.resolveFollowRoom(webRid: room.webRid)
+            guard livePick.isCurrent(roomID: room.id, token: ticket) else { return }
+            if result.stale { return }
+            let elapsed = String(format: "%.3f", ProcessInfo.processInfo.systemUptime - started)
+            if result.kind == .notLoggedIn {
+                DYLiveModel.log("DDFOLLOWPLAY outcome=notLoggedIn reused=0 detailRequests=1 elapsed=\(elapsed)")
+                liveNow = []
+                onLogin()
+                return
+            }
+            if result.kind == .rooms, let resolved = result.items.first, !resolved.liveStreams.isEmpty {
+                DYLiveModel.log("DDFOLLOWPLAY outcome=ready reused=0 detailRequests=1 elapsed=\(elapsed)")
+                onLive(DYLiveRoom(playback: resolved, fallback: room))
+                return
+            }
+            let failure = DYFollowSelectionFailure.from(kind: result.kind, hasPlayableRoom: false) ?? .unavailable
+            DYLiveModel.log("DDFOLLOWPLAY outcome=\(failure) reused=0 detailRequests=1 elapsed=\(elapsed)")
+            onToast(failure.message)
+        }
+    }
+
+    /// 顶部「直播中」头像：跟抖音关注页一样，点了直接进这个主播的直播间
+    private var liveRow: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 14) {
+                ForEach(liveNow) { r in
+                    Button { openLive(r) } label: {
+                        VStack(spacing: 4) {
+                            CachedAsyncImage(url: r.avatar.flatMap(URL.init(string:))) { img in img.resizable().scaledToFill() }
+                                placeholder: { theme.media.chromeFill.color(for: scheme) }
+                                .frame(width: 58, height: 58).clipShape(Circle())
+                                .padding(3)
+                                .overlay(Circle().stroke(theme.status.danger.color(for: scheme), lineWidth: 2.5))
+                                .overlay(alignment: .bottom) {
+                                    Text("直播中").font(.caption2.weight(.bold)).foregroundStyle(theme.media.onMedia.color(for: scheme))
+                                        .padding(.horizontal, 6).padding(.vertical, 2)
+                                        .background(Capsule().fill(theme.status.danger.color(for: scheme)))
+                                        .offset(y: 6)
+                                }
+                            Text(r.owner).font(.caption2).foregroundStyle(theme.media.onMedia.color(for: scheme)).lineLimit(1).frame(width: 70)
+                                .padding(.top, 4)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 14)
+        }
+        .scrollIndicators(.hidden)
+        .padding(.trailing, insets.trailing)
+        .themeShadow(.mediaLabel)
     }
 
     private func like(_ id: String, force: Bool?) {

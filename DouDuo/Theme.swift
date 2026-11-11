@@ -1,4 +1,4 @@
-// 主题垫片：抖Duo 只有沉浸式黑底播放界面，用固定配色实现 無為 主题令牌的同名接口，业务代码零改动复用。
+// 主题垫片：DouDuo 只有沉浸式黑底播放界面，用固定配色实现 無為 主题令牌的同名接口，业务代码零改动复用。
 import SwiftUI
 
 struct DDColor {
@@ -18,6 +18,12 @@ struct DDTheme {
         let onMedia = DDColor(.white)
         let onMediaSecondary = DDColor(.white.opacity(0.72))
         let chromeFill = DDColor(.black.opacity(0.35))
+        // Optical calibration from the owner's build84 screenshot: signal x=1215,
+        // rail x=1223, 54pt capsule spans 73px. 8 * 54 / 73 ≈ 6pt leading.
+        // This is not the system column width; runtime geometry still determines that.
+        let expandedRailOpticalInset: CGFloat = 6
+        let actionItemSpacing: CGFloat = 12
+        let actionGroupSpacing: CGFloat = 16
     }
     struct Status {
         let danger = DDColor(Color(red: 1.0, green: 0.17, blue: 0.33))     // 抖音红
@@ -39,11 +45,20 @@ struct DDTheme {
     let media = Media()
     let status = Status()
     let typography = Typography()
+    /// Shared native/web IM canvas; CSS values stay in the theme, not business scripts.
+    struct Messages {
+        let headerHeight: CGFloat = 60
+        let canvasCSS = "#000000"
+        let separatorCSS = "rgba(255,255,255,0.10)"
+    }
+    let messages = Messages()
     let accent = DDColor(Color(red: 1.0, green: 0.17, blue: 0.33))
 }
 
 extension EnvironmentValues {
     @Entry var appTheme = DDTheme()
+    /// 界面放大系数：目前固定 1（不做全局缩放）；PR 里播放器部分用到，先给个默认值
+    @Entry var ddScale: CGFloat = 1
 }
 
 enum DDElevation { case mediaLabel, floatingPanel }
@@ -60,6 +75,40 @@ extension View {
 extension ShapeStyle where Self == Color {
     static var themeTextPrimary: Color { .primary }
     static var themeTextSecondary: Color { .secondary }
+}
+
+// MARK: - 液态玻璃圆按钮（iOS 26+ glassEffect；低版本回退 ultraThinMaterial 圆底）
+
+extension View {
+    /// 液态玻璃圆底：iOS 26+ 用 `.glassEffect(.regular.interactive(), in: .circle)`；
+    /// 传入 tint 表示选中态（点赞红 / 收藏黄），用 `.regular.tint(color.opacity(0.22)).interactive()`；
+    /// iOS 26 以下回退 `.ultraThinMaterial` 圆底（选中态叠一层 22% 的 tint）。
+    @ViewBuilder
+    func ddGlassCircle(_ tint: Color? = nil) -> some View {
+        if #available(iOS 26.0, *) {
+            if let tint {
+                self.glassEffect(.regular.tint(tint.opacity(0.22)).interactive(), in: .circle)
+            } else {
+                self.glassEffect(.regular.interactive(), in: .circle)
+            }
+        } else {
+            self
+                .background(tint.map { $0.opacity(0.22) } ?? .clear, in: Circle())
+                .background(.ultraThinMaterial, in: Circle())
+        }
+    }
+}
+
+extension View {
+    /// 竖向液态玻璃胶囊（小红书式右侧栏底板）
+    @ViewBuilder
+    func ddGlassCapsule() -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(.regular.interactive(), in: .capsule)
+        } else {
+            self.background(.ultraThinMaterial, in: Capsule())
+        }
+    }
 }
 
 struct GlassBackground: View {

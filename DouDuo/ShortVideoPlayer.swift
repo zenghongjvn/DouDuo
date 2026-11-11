@@ -2,20 +2,44 @@
 // AVPlayer 直连、横滑快进（预览缩略图 + 目标时间 HUD）、双击、长按 2 倍速、单击暂停、竖滑切视频、底部可拖进度条。
 import SwiftUI
 import AVFoundation
+import MediaPlayer
 
-/// 全局播放登记表：App 进后台/失焦时由 App 层直接命令所有播放器停声，
+/// 谁触发了这次全局暂停。失焦、后台和 App 内覆盖层不是同一件事。
+enum DDPlaybackPauseReason: Equatable {
+    case inactive
+    case background
+    case cover
+}
+
+/// 全局播放登记表：App 进后台/失焦时由 App 层直接通知所有播放器，
 /// 比依赖视图的 onReceive 稳（视图可能还没渲染、或被 LazyVStack 回收）。
+/// 短视频是否继续，由「后台播放」决定。直播是否继续出声，由「后台直播声音」决定。
+/// 音频会话只在短视频后台播放和直播都不需要时才交给其他 App。
+/// 当前绑着锁屏控件的播放页 id（空 = 没绑）
+@MainActor enum DDRemoteOwner { static var id = "" }
+
 final class DDPlayback {
     static let shared = DDPlayback()
     private var stoppers: [UUID: () -> Void] = [:]
     private var starters: [UUID: () -> Void] = [:]
+    private var sessionRetainers: [UUID: () -> Bool] = [:]
     private var lock = NSLock()
     /// App 当前是否在前台：注册晚于切后台时（视频刚起播），要立刻停，不能接着响
     private(set) var appIsActive = true
+    private(set) var pauseReason: DDPlaybackPauseReason = .background
+    /// 转发等覆盖层还盖着。后台锁不能把它清掉，前台回调也不能在它消失前把直播拉起来。
+    private var coverCount = 0
+    var coverHold: Bool { coverCount > 0 }
 
-    func register(_ id: UUID, stop: @escaping () -> Void, start: @escaping () -> Void) {
+    /// 「更多」菜单里的「后台播放」：短视频开了就不因切后台/锁屏停声（听书用）。
+    /// 不跳过直播自己的后台策略。
+    static var bgPlay: Bool { UserDefaults.standard.bool(forKey: "douyin_bg_play_v1") }
+
+    func register(_ id: UUID, stop: @escaping () -> Void, start: @escaping () -> Void, retainsAudioSession: (() -> Bool)? = nil) {
         lock.lock(); defer { lock.unlock() }
         stoppers[id] = stop; starters[id] = start
+        if let retainsAudioSession { sessionRetainers[id] = retainsAudioSession }
+        else { sessionRetainers[id] = nil }
         let shouldStop = !appIsActive
         #if DEBUG
         ddWrite("DDBG register \(id.uuidString.prefix(4)) total=\(stoppers.count) appActive=\(appIsActive)")
@@ -24,26 +48,70 @@ final class DDPlayback {
     }
     func unregister(_ id: UUID) {
         lock.lock(); defer { lock.unlock() }
-        stoppers[id] = nil; starters[id] = nil
+        stoppers[id] = nil; starters[id] = nil; sessionRetainers[id] = nil
         #if DEBUG
         ddWrite("DDBG unregister \(id.uuidString.prefix(4)) total=\(stoppers.count)")
         #endif
     }
-    func pauseAll() {
-        appIsActive = false
-        lock.lock(); let s = Array(stoppers.values); lock.unlock()
+    /// 控制中心、通知横幅这类失焦。短视频暂停；不把 App 标成后台，直播的停止留到真正的 background。
+    func pauseForInactivity() {
+        guard appIsActive else { return }
+        lock.lock()
+        let stops = Array(stoppers.values)
+        lock.unlock()
+        let previous = pauseReason
+        pauseReason = .inactive
+        stops.forEach { $0() }
+        if pauseReason == .inactive { pauseReason = previous }
+    }
+    func pauseAll(reason: DDPlaybackPauseReason = .background) {
+        if reason == .cover { coverCount += 1 }
+        let backgroundWhileCover = reason == .background && !appIsActive && coverCount > 0
+        if !backgroundWhileCover {
+            guard DYLivePlaybackGate.apply(appIsActive: appIsActive, command: .pause) else {
+                if reason == .cover { coverCount = max(0, coverCount - 1) }
+                return
+            }
+            appIsActive = false
+        }
+        pauseReason = reason
+        lock.lock()
+        let stops = Array(stoppers.values)
+        let retainers = Array(sessionRetainers.values)
+        lock.unlock()
         #if DEBUG
-        ddWrite("DDBG pauseAll count=\(s.count)")
+        let label = reason == .background ? "background" : (reason == .cover ? "cover" : "inactive")
+        ddWrite("DDBG pauseAll count=\(stops.count) reason=\(label)")
         #endif
-        s.forEach { $0() }
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        stops.forEach { $0() }
+        let keepSession = Self.bgPlay || retainers.contains { $0() }
+        if !keepSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
     }
     func resumeAll() {
+        guard DYLivePlaybackGate.apply(appIsActive: appIsActive, command: .resume) else { return }
         appIsActive = true
+        guard coverCount == 0 else { return }
+        startRegisteredPlayers()
+    }
+    /// 覆盖层消失。还在后台时只减计数；人已经回到前台才启动。
+    func releaseCover() {
+        guard coverCount > 0 else { return }
+        coverCount -= 1
+        guard coverCount == 0, UIApplication.shared.applicationState == .active else { return }
+        appIsActive = true
+        startRegisteredPlayers()
+    }
+    private func startRegisteredPlayers() {
         lock.lock(); let s = Array(starters.values); lock.unlock()
         #if DEBUG
         ddWrite("DDBG resumeAll count=\(s.count)")
         #endif
+        if !s.isEmpty {
+            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+            try? AVAudioSession.sharedInstance().setActive(true)
+        }
         s.forEach { $0() }
     }
 }
@@ -79,20 +147,21 @@ extension PlayerPage {
                          preparedPlayer: (() -> AVPlayer?)? = nil,
                          onEnded: (() -> Void)?, onDoubleTap: (() -> Void)?,
                          onSavePosition: @escaping (Double) -> Void, onClose: @escaping () -> Void,
-                         fillWidth: Bool = true, danmaku: [DYDanmaku] = []) -> PlayerPage {
+                         fillWidth: Bool = true, danmaku: [DYDanmaku] = [], altURL: URL? = nil,
+                         quality: String? = nil, fastURL: URL? = nil, posterURL: URL? = nil,
+                         videoAspect: Double = 0,
+                         headEndSeconds: Double? = nil, continuationURL: URL? = nil) -> PlayerPage {
         PlayerPage(id: id, url: url, knownDuration: durationSec, isActive: isActive, bottomInset: bottomInset,
                    resumePosition: resumePosition, preparedPlayer: preparedPlayer, onEnded: onEnded,
                    onDoubleTap: onDoubleTap, onSavePosition: onSavePosition, fillWidth: fillWidth,
-                   topInset: topInset, danmaku: danmaku)
+                   topInset: topInset, danmaku: danmaku, altURL: altURL, quality: quality, fastURL: fastURL,
+                   posterURL: posterURL, headEndSeconds: headEndSeconds,
+                   continuationURL: continuationURL, videoAspect: videoAspect, title: title)
     }
 }
 
 struct PlayerPage: View {
-    /// 沉底布局：进度条控件距物理屏幕底边（细线本身再高 8pt，共 16pt，刚好让开 Home 条）
-    static let barBottomGap: CGFloat = 8
-    /// 沉底布局：文案距屏幕底边（在时间文字上方）
-    static let captionBottomGap: CGFloat = 44
-
+    @Environment(\.duoContentInsets) private var chromeInsets
     let id: String
     let url: URL
     let knownDuration: Double
@@ -108,12 +177,46 @@ struct PlayerPage: View {
     var topInset: CGFloat = 0
     /// 视频弹幕（空 = 不显示）
     var danmaku: [DYDanmaku] = []
+    /// 高清流起不来时的备用地址（抖音默认清晰度那条）；看门狗第一次重建就换它
+    var altURL: URL? = nil
+    /// 选中的清晰度描述（只进调试日志）
+    var quality: String? = nil
+    /// 秒开：低码率地址。滑到一条还没缓冲好的视频时先放它，高清在上层缓冲好后无缝盖上去
+    var fastURL: URL? = nil
+    /// 封面：首帧出来前先显示（网格里已经缓存过，点进来立刻有画面，不是黑屏转圈）
+    var posterURL: URL? = nil
+    /// 本地「头部缓存」能安全播到的秒数：播到这里就用 continuationURL 接上在线流，
+    /// 不能让 AVPlayer 冲到没数据的尾部（那样会卡住而不是 ended）
+    var headEndSeconds: Double? = nil
+    /// 头部缓存播完后继续播的在线地址（一次性）
+    var continuationURL: URL? = nil
+    @State private var continued = false
+    @State private var firstFrame = false
+    /// 视频画面宽高比（海报占位用同一套铺满规则，避免「先小后跳」）
+    var videoAspect: Double = 0
+    /// 锁屏 / 控制中心「正在播放」上显示的标题
+    var title: String = ""
+    /// 上一次刷新「正在播放」信息的位置（约每秒一次）
+    @State private var lastNowPlaying = -10.0
+    /// 静音（右下角按钮，全局记住）
+    @AppStorage("douyin_muted_v1") private var muted = false
+    @Environment(\.ddScale) private var ui
+
+    private var dmStress: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["DOUDUO_DM_STRESS"] == "1"
+        #else
+        false
+        #endif
+    }
 
     @State private var player: AVPlayer?
     @State private var imgGen: AVAssetImageGenerator?
     @State private var duration: Double = 0
     @State private var current: Double = 0
     @State private var isPlaying = false
+    /// 用户是不是手动暂停了：回前台不能把「我自己按的暂停」当成后台中断接着播。
+    @State private var userPaused = false
     @State private var seeking = false
     @State private var seekPreview: Double = 0
     @State private var seekDelta: Double = 0
@@ -121,11 +224,31 @@ struct PlayerPage: View {
     @State private var lastPreviewAt: Double = 0
     @State private var holdAnchor: Double = 0
     @State private var rateBoost = false
+    /// 设置里选的速度（全局、持久化）：所有视频都按它播
+    @AppStorage("douyin_playback_rate_v1") private var playbackRate = 1.0
+    /// 长按下滑锁定的 2 倍速：只锁当前这条视频，滑到下一条自动回到设置速度
+    @State private var lockedBoost = false
+
+    /// 当前实际速度：本视频锁了 2 倍就 2 倍，否则跟设置走
+    private var effectiveRate: Double { lockedBoost ? 2 : playbackRate }
+    private func rateText(_ r: Double) -> String {
+        r == r.rounded() ? String(format: "%.0f×", r) : String(format: "%g×", r)
+    }
+    @State private var dmClock = DYDanmakuClock()
     @State private var timeToken: Any?
     @State private var endObserver: NSObjectProtocol?
     @State private var barWidth: CGFloat = 1
     @State private var vlc: VLCPlayerController?        // AVPlayer 起播失败 → VLC 软解兜底
     @State private var avRetried = false
+    /// 秒开期间：高清播放器（静音、几乎透明地叠在低清上面缓冲），就绪后淡入接管
+    @State private var hdPlayer: AVPlayer?
+    @State private var hdVisible = false
+    /// 头部缓存播完要接在线流：提前预热好，到点直接换图层里的 player（不重建、不重新缓冲）
+    @State private var nextPlayer: AVPlayer?
+    @State private var nextPrimedAt: Double = 0
+    @State private var nextOpacity: Double = 0
+    @State private var stalledTicks = 0
+    @State private var fastT0 = Date()
     private let playbackID = UUID()
 
     var body: some View {
@@ -135,36 +258,86 @@ struct PlayerPage: View {
                 // 画面铺到屏幕边缘（状态栏/底部安全区也盖住）：跟抖音原生一样，不留上下黑边
                 VLCPlayerSurface(controller: vlc, fillWidth: fillWidth).ignoresSafeArea()
             } else if let player {
-                VideoSurface(player: player, fillWidth: fillWidth).ignoresSafeArea()
+                // 画面层真正有帧可显示（isReadyForDisplay）就撤掉封面：预加载 / 本地缓存的视频滑过来就是真画面，
+                // 不再「先闪一下封面再播」
+                ZStack {
+                    VideoSurface(player: player, fillWidth: fillWidth, onReady: { if !firstFrame { firstFrame = true } })
+                        .ignoresSafeArea()
+                    // 头部缓存接在线流：新播放器先叠在上面亮相（已缓冲、时间点对齐），再撤掉旧的，
+                    // 避免换 AVPlayerLayer 的 player 时断帧
+                    if let np = nextPlayer {
+                        VideoSurface(player: np, fillWidth: fillWidth)
+                            .ignoresSafeArea()
+                            .opacity(nextOpacity)
+                            .allowsHitTesting(false)
+                    }
+                }
             } else {
                 ProgressView().tint(.white)
             }
-            if isActive && !danmaku.isEmpty {
-                DYDanmakuLayer(items: danmaku, time: current, topInset: topInset)
+            if vlc == nil, let hd = hdPlayer {
+                // 0.001 而不是 0：完全透明的层可能不出画面，换上来时会黑一下
+                VideoSurface(player: hd, fillWidth: fillWidth).ignoresSafeArea()
+                    .opacity(hdVisible ? 1 : 0.001).allowsHitTesting(false)
+            }
+            // 封面只给「还没缓存、还没出帧」的在线视频兜底；本地已缓存的直接等首帧（几十毫秒），不铺封面
+            if !firstFrame, !url.isFileURL, let posterURL {
+                GeometryReader { g in
+                    let screen = g.size.width / max(g.size.height, 1)
+                    let video = videoAspect > 0 ? videoAspect : screen
+                    let same = (video < 1) == (screen < 1)
+                    CachedAsyncImage(url: posterURL) { img in
+                        img.resizable().aspectRatio(contentMode: fillWidth && same ? .fill : .fit)
+                    } placeholder: { Color.clear }
+                    .frame(width: g.size.width, height: g.size.height)
+                }
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+            if isActive && (!danmaku.isEmpty || dmStress) {
+                DYDanmakuLayer(items: danmaku, clock: dmClock, topInset: topInset)
             }
             // 手势层铺满整页（含视频上下黑边）：横滑快进 / 单击 / 双击 / 长按，竖滑漏给分页
             if player != nil || vlc != nil { gestures }
             if seeking { seekHUD }
             if isActive && !isPlaying && (player != nil || vlc != nil) && !seeking {
-                Image(systemName: "play.fill").font(.system(size: 52)).foregroundStyle(.white.opacity(0.75))
+                Image(systemName: "play.fill").font(.system(size: 52 * ui)).foregroundStyle(.white.opacity(0.75))
                     .allowsHitTesting(false)
             }
-            if rateBoost {
-                Label("2 倍速播放中", systemImage: "forward.fill")
-                    .font(.caption.weight(.semibold)).foregroundStyle(.white)
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(Capsule().fill(.black.opacity(0.45)))
-                    .frame(maxHeight: .infinity, alignment: .top).padding(.top, 70)
-                    .allowsHitTesting(false)
+            // 常驻倍速角标：只要不是 1 倍就一直显示；长按时再提示「下滑锁定 / 上滑取消」
+            if effectiveRate != 1 || rateBoost {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(rateText(effectiveRate)).font(.caption.weight(.bold)).monospacedDigit()
+                        .accessibilityIdentifier("douyin.rateBadge")
+                    if rateBoost {
+                        Text(lockedBoost ? "上滑取消倍速" : "下滑锁定倍速")
+                            .font(.system(size: 9)).opacity(0.85)
+                    } else if lockedBoost {
+                        Text("已锁定本条 · 长按上滑取消").font(.system(size: 9)).opacity(0.85)
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 9).padding(.vertical, 5)
+                .background(Capsule().fill(.black.opacity(0.45)))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.leading, 14).padding(.top, 66 * ui)
+                .allowsHitTesting(false)
             }
         }
         .overlay(alignment: .bottom) {
-            // 贴着物理屏幕底边摆：不管外层容器有没有让开安全区，都忽略
-            if isActive { progressBar.padding(.bottom, Self.barBottomGap).ignoresSafeArea(edges: .bottom) }
+            if isActive {
+                progressBar
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("视频进度")
+                    .accessibilityValue("\(Int(current.isFinite ? current : 0)) / \(Int(duration.isFinite ? duration : 0)) 秒")
+                    .accessibilityIdentifier("douyin.progress")
+                    .padding(chromeInsets)
+                    .padding(.bottom, max(bottomInset, 8))
+            }
         }
-        .ignoresSafeArea(edges: .bottom)
         .onAppear {
             if player == nil { setup() }
+            if isActive { bindRemote() }
             DDPlayback.shared.register(playbackID, stop: { pauseForBackground() }, start: { resumeAfterBackground() })
         }
         .onDisappear {
@@ -181,18 +354,42 @@ struct PlayerPage: View {
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             resumeAfterBackground()
         }
+        .onChange(of: muted) { _, m in
+            guard isActive else { return }
+            player?.isMuted = m
+            vlc?.mediaPlayer.audio?.isMuted = m
+        }
+        // 设置里改播放速度 = 明确要这个速度：撤掉本条的长按锁定，当前视频立刻生效
+        .onChange(of: playbackRate) { _, newRate in
+            if !rateBoost { lockedBoost = false }
+            let target = rateBoost ? 2 : newRate
+            if let v = vlc { v.setRate(Float(target)) }
+            else if let p = player, isPlaying { p.rate = Float(target) }
+        }
         .onChange(of: isActive) { _, active in
+            if !active { lockedBoost = false }   // 滑走就解锁：只锁「当前这条」
+            if active { bindRemote() }
             if let v = vlc {
-                if active { v.mediaPlayer.audio?.isMuted = false; v.mediaPlayer.play(); isPlaying = true }
+                if active { v.mediaPlayer.audio?.isMuted = muted; v.mediaPlayer.play(); isPlaying = true }
                 else { v.mediaPlayer.pause(); isPlaying = false; onSavePosition(v.current) }
                 return
             }
+            if !active && hdPlayer != nil { revertToHD() }   // 秒开中途滑走：留下高清那个，回来接着用
             guard let p = player else { if active { setup() }; return }
             if active, p.currentItem == nil || p.currentItem?.status == .failed { rebuild(); return }
+            if active, shouldFastStart(p) {
+                try? AVAudioSession.sharedInstance().setCategory(.playback)
+                try? AVAudioSession.sharedInstance().setActive(true)
+                startFast(hd: p)
+                return
+            }
             if active {
                 try? AVAudioSession.sharedInstance().setCategory(.playback)
                 try? AVAudioSession.sharedInstance().setActive(true)
-                p.isMuted = false; p.play(); isPlaying = true
+                #if DEBUG
+                logSwipeStart(p)
+                #endif
+                p.isMuted = muted; p.play(); isPlaying = true
                 watchdog(p)
             } else {
                 p.isMuted = true; p.pause(); isPlaying = false
@@ -209,12 +406,20 @@ struct PlayerPage: View {
             onDoubleTap: { _, _ in onDoubleTap?() },
             onLongPress: { pressing in
                 if let v = vlc {
-                    if pressing { v.setRate(2); rateBoost = true } else if rateBoost { v.setRate(1); rateBoost = false }
+                    if pressing { v.setRate(2); rateBoost = true } else if rateBoost { v.setRate(Float(effectiveRate)); rateBoost = false }
                     return
                 }
                 guard let p = player else { return }
                 if pressing { p.rate = 2; rateBoost = true }
-                else if rateBoost { p.rate = isPlaying ? 1 : 0; rateBoost = false }
+                else if rateBoost { p.rate = isPlaying ? Float(effectiveRate) : 0; rateBoost = false }
+            },
+            // 下滑：锁住本条视频的 2 倍速（不写设置、不影响下一条）
+            onLongPressLock: { lockedBoost = true },
+            // 上滑：立刻取消倍速，回到设置里的速度
+            onLongPressUnlock: {
+                lockedBoost = false; rateBoost = false
+                if let v = vlc { v.setRate(Float(playbackRate)) }
+                else { player?.rate = isPlaying ? Float(playbackRate) : 0 }
             },
             onSeekBegan: {
                 guard duration > 0 else { return }
@@ -248,7 +453,7 @@ struct PlayerPage: View {
                     Color.black.opacity(0.4).overlay(ProgressView().tint(.white))
                 }
             }
-            .frame(width: 196, height: 110)
+            .frame(width: 196 * ui, height: 110 * ui)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             HStack(spacing: 8) {
                 Text(fmt(seekPreview)).font(.subheadline.weight(.bold).monospacedDigit())
@@ -268,31 +473,26 @@ struct PlayerPage: View {
     private var progressBar: some View {
         let pos = seeking ? seekPreview : current
         let frac = duration > 0 ? max(0, min(1, pos / duration)) : 0
-        return VStack(spacing: 4) {
-            HStack {
-                Text(fmt(pos)); Spacer(); Text(fmt(duration))
-            }
-            .font(.caption2.monospacedDigit()).foregroundStyle(.white.opacity(seeking ? 0.9 : 0.45))
-            .padding(.horizontal, 16)
+        // 不显示时间（拖动时预览气泡里有），只留细进度条
+        return VStack(spacing: 0) {
             GeometryReader { g in
                 ZStack(alignment: .leading) {
                     // 平时半透明不挡画面（横滑全屏都能拖进度），拖动时才变实
-                    Capsule().fill(.white.opacity(seeking ? 0.28 : 0.12)).frame(height: seeking ? 6 : 2)
-                    Capsule().fill(.white.opacity(seeking ? 1 : 0.4)).frame(width: g.size.width * frac, height: seeking ? 6 : 2)
-                    Circle().fill(.white.opacity(seeking ? 1 : 0.45)).frame(width: seeking ? 15 : 6, height: seeking ? 15 : 6)
-                        .offset(x: max(0, g.size.width * frac - (seeking ? 7.5 : 3)))
+                    Capsule().fill(.white.opacity(seeking ? 0.28 : 0.12)).frame(height: (seeking ? 6 : 2) * ui)
+                    Capsule().fill(.white.opacity(seeking ? 1 : 0.4)).frame(width: g.size.width * frac, height: (seeking ? 6 : 2) * ui)
+                    Circle().fill(.white.opacity(seeking ? 1 : 0.45)).frame(width: (seeking ? 15 : 6) * ui, height: (seeking ? 15 : 6) * ui)
+                        .offset(x: max(0, g.size.width * frac - (seeking ? 7.5 : 3) * ui))
                 }
                 .frame(maxHeight: .infinity)
                 .onAppear { barWidth = g.size.width }
                 .onChange(of: g.size.width) { _, w in barWidth = w }
             }
-            .frame(height: 16)
-            .padding(.horizontal, 16)
-        }
-        // 常驻拖动区：高 40，按住左右拖拉进度。叠在进度条上而不是垫在下面，否则细线沉不到底
-        .overlay(alignment: .bottom) {
-            Color.white.opacity(0.001).frame(height: 40).contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0)
+            .frame(height: 16 * ui)
+            .padding(.horizontal, 16 * ui)
+            // 拖动区：进度条往上多 20pt 好按，不往下占空白
+            .padding(.top, 20 * ui)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
                     .onChanged { v in
                         guard duration > 0 else { return }
                         if !seeking { holdAnchor = current; seeking = true }
@@ -306,6 +506,98 @@ struct PlayerPage: View {
 
     // MARK: 播放
 
+    /// 头部缓存文件：把播放终点钉在安全位置，播到这里会正常 ended，而不是卡在没数据的尾部
+    private func makeItem(asset: AVAsset) -> AVPlayerItem {
+        let item = AVPlayerItem(asset: asset)
+        if let h = headEndSeconds, h > 0 {
+            item.forwardPlaybackEndTime = CMTime(seconds: h, preferredTimescale: 600)
+        }
+        return item
+    }
+
+    /// 头部缓存播完 → 用在线流从同一时间点接上（一次性；接上后不再触发）
+    @discardableResult
+    private func continueFromRemote(_ p: AVPlayer) -> Bool {
+        guard !continued, let remote = continuationURL else { return false }
+        let start = headEndSeconds ?? p.currentTime().seconds
+        // 预热好的播放器直接接管：图层里的 player 从 p 换成 np（都不是 nil，不重建 surface）
+        if let np = nextPlayer, np.currentItem?.status == .readyToPlay {
+            handOver(to: np, from: p, at: start, primed: true)
+            return true
+        }
+        continued = true
+        #if DEBUG
+        ddWrite("DDHEAD continue remote(cold) at \(String(format: "%.1f", start))")
+        #endif
+        teardownPlayerOnly()
+        let np = AVPlayer(playerItem: AVPlayerItem(asset: DYMedia.asset(remote)))
+        np.automaticallyWaitsToMinimizeStalling = true
+        player = np
+        attachObservers(np)
+        np.isMuted = muted
+        np.seek(to: CMTime(seconds: start, preferredTimescale: 600)) { _ in np.play() }
+        isPlaying = true
+        watchdog(np)
+        return true
+    }
+
+    /// 距接续点还有几秒时，先把在线流的播放器拉起来缓冲（静音、不显示），到点零等待接管
+    private func primeContinuation() {
+        guard !continued, nextPlayer == nil, let remote = continuationURL, let h = headEndSeconds, h > 0 else { return }
+        // 整条已经下完（多数视频在播到接续点前就下完了）→ 直接读本地文件续播，
+        // 本地 seek 是瞬时的，切换后不会再有等网络缓冲的卡顿
+        let localFull = DYVideoCache.localURL(id)
+        let src = localFull ?? remote
+        let np = AVPlayer(playerItem: AVPlayerItem(asset: DYMedia.asset(src)))
+        np.automaticallyWaitsToMinimizeStalling = true
+        np.isMuted = true
+        // 缓冲就绪后停住；接续点前后各留一点已缓冲数据，切换时 seek 是瞬时的
+        np.seek(to: CMTime(seconds: max(0, h - 0.4), preferredTimescale: 600),
+                toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+            DispatchQueue.main.async {
+                np.play()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { if self.nextPlayer === np { np.pause() } }
+            }
+        }
+        nextOpacity = 0.01          // 极低透明度常驻：layer 一直在出帧，切换时只改透明度，不来不急建层
+        nextPlayer = np
+        nextPrimedAt = h
+        #if DEBUG
+        ddWrite("DDHEAD prime at \(String(format: "%.1f", h)) src=\(localFull != nil ? "local" : "remote")")
+        #endif
+    }
+
+    /// 把画面和时间轴从旧 player 交接到新 player：新画面先叠上层亮相，再撤旧层，全程不断帧
+    private func handOver(to np: AVPlayer, from old: AVPlayer, at start: Double, primed: Bool) {
+        guard !continued else { return }
+        continued = true
+        #if DEBUG
+        ddWrite("DDHEAD continue remote at \(String(format: "%.1f", start)) primed=\(primed)")
+        #endif
+        let wasPlaying = isPlaying
+        np.isMuted = muted
+        // 先把它精确定位到接续点（预热过的话这段是已缓冲区间，seek 基本瞬时），
+        // seek 完成才让它亮相，避免露出预热时的错帧
+        np.seek(to: CMTime(seconds: start, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+            DispatchQueue.main.async {
+                if wasPlaying { np.play() }
+                self.nextOpacity = 1
+                // 新画面已经在顶层播同一位置 → 把主 player 换过去（此时 layer 换绑不会露黑）
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                    if let t = self.timeToken { old.removeTimeObserver(t); self.timeToken = nil }
+                    if let o = self.endObserver { NotificationCenter.default.removeObserver(o); self.endObserver = nil }
+                    self.player = np
+                    self.nextOpacity = 0
+                    self.nextPlayer = nil
+                    self.attachObservers(np)
+                    self.isPlaying = wasPlaying
+                    self.watchdog(np)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { old.replaceCurrentItem(with: nil) }
+                }
+            }
+        }
+    }
+
     private func setup() {
         #if DEBUG
         if ProcessInfo.processInfo.environment["DOUDUO_FORCE_VLC"] == "1" {
@@ -314,8 +606,15 @@ struct PlayerPage: View {
         }
         #endif
         let pre = preparedPlayer?()
+        #if DEBUG
+        let preReady = pre?.currentItem?.status == .readyToPlay
+        let preBuf = pre?.currentItem?.loadedTimeRanges.first.map { CMTimeGetSeconds($0.timeRangeValue.duration) } ?? 0
+        #endif
         let asset = (pre?.currentItem?.asset as? AVURLAsset) ?? DYMedia.asset(url)
-        let p = pre ?? AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        let p = pre ?? AVPlayer(playerItem: makeItem(asset: asset))
+        if let pre, let h = headEndSeconds, pre.currentItem?.forwardPlaybackEndTime.seconds ?? 0 <= 0 {
+            pre.currentItem?.forwardPlaybackEndTime = CMTime(seconds: h, preferredTimescale: 600)
+        }
         p.automaticallyWaitsToMinimizeStalling = true
         player = p
         if knownDuration > 0 { duration = knownDuration }
@@ -327,7 +626,13 @@ struct PlayerPage: View {
         imgGen = gen
         attachObservers(p)
         if let r = resumePosition, r > 1 { p.seek(to: CMTime(seconds: r, preferredTimescale: 600)) }
-        p.isMuted = !isActive
+        if isActive, shouldFastStart(p) {
+            try? AVAudioSession.sharedInstance().setCategory(.playback)
+            try? AVAudioSession.sharedInstance().setActive(true)
+            startFast(hd: p)
+            return
+        }
+        p.isMuted = !isActive || muted
         if isActive {
             try? AVAudioSession.sharedInstance().setCategory(.playback)
             try? AVAudioSession.sharedInstance().setActive(true)
@@ -341,7 +646,7 @@ struct PlayerPage: View {
             func probe(_ n: Int) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                     if p.currentTime().seconds > 0.05 {
-                        ddWrite("DDSTART \(id) local=\(url.isFileURL) 起播用时=\(String(format: "%.2f", Date().timeIntervalSince(t0)))s 距启动=\(String(format: "%.2f", Date().timeIntervalSince(DDLaunch.t0)))s")
+                        ddWrite("DDSTART \(id) local=\(url.isFileURL) pre=\(pre != nil) preReady=\(preReady) preBuf=\(String(format: "%.1f", preBuf))s q=\(quality ?? "-") 起播用时=\(String(format: "%.2f", Date().timeIntervalSince(t0)))s 距启动=\(String(format: "%.2f", Date().timeIntervalSince(DDLaunch.t0)))s")
                     } else if n < 100 { probe(n + 1) }
                 }
             }
@@ -351,6 +656,149 @@ struct PlayerPage: View {
             ddWrite("DDPLAY \(id) active=\(isActive) engine=\(vlc == nil ? "AV" : "VLC") status=\(p.currentItem?.status.rawValue ?? -1) t=\(p.currentTime().seconds) err=\(String(describing: p.currentItem?.error))")
         }
         #endif
+    }
+
+    #if DEBUG
+    /// 滑到这条时记一笔：滑入时缓冲了多少、是不是本地文件、后台缓存在下几条，以及多久真正动起来
+    private func logSwipeStart(_ p: AVPlayer, fast: Bool = false) {
+        let t0 = Date(), start = p.currentTime().seconds
+        let it = p.currentItem
+        let buf = it?.loadedTimeRanges.first.map { CMTimeGetSeconds($0.timeRangeValue.duration) } ?? 0
+        let st = it?.status.rawValue ?? -1
+        let local = (it?.asset as? AVURLAsset)?.url.isFileURL ?? false
+        let dl = DYVideoCache.activeDownloads
+        let th = ProcessInfo.processInfo.thermalState.rawValue   // 0 正常 1 微热 2 烫 3 很烫
+        func probe(_ n: Int) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                guard player === p else { return }
+                if p.currentTime().seconds > start + 0.05 {
+                    ddWrite("DDSWIPE \(id) 起播=\(String(format: "%.2f", Date().timeIntervalSince(t0)))s fast=\(fast) local=\(local) status=\(st) buf=\(String(format: "%.1f", buf))s dl=\(dl) th=\(th) q=\(quality ?? "-")")
+                } else if n < 400 { probe(n + 1) }
+                else { ddWrite("DDSWIPE \(id) 20s 未起播 local=\(local) status=\(st) buf=\(String(format: "%.1f", buf))s dl=\(dl)") }
+            }
+        }
+        probe(0)
+    }
+    #endif
+
+    // MARK: 秒开（低码率先放，高清缓冲好后无缝接管）
+
+    /// 冷：没就绪，或就绪了但缓冲不到 1 秒。本地文件 / 没有低码率档 / VLC 接管中都不走秒开
+    private func shouldFastStart(_ p: AVPlayer) -> Bool {
+        // 默认关：实测低清也要 1–2s 才起播、还要两路解码陪跑发热；直连 CDN 后冷启动本身快了 ~1s。菜单里可开
+        guard UserDefaults.standard.bool(forKey: "douyin_faststart_v1"), fastURL != nil, vlc == nil, hdPlayer == nil, !url.isFileURL, let it = p.currentItem else { return false }
+        if (it.asset as? AVURLAsset)?.url.isFileURL == true { return false }
+        let buf = it.loadedTimeRanges.first.map { CMTimeGetSeconds($0.timeRangeValue.duration) } ?? 0
+        return it.status != .readyToPlay || buf < 1
+    }
+
+    private func startFast(hd: AVPlayer) {
+        guard let f = fastURL else { return }
+        detachObservers()
+        let resume = hd.currentTime()
+        // 高清：静音陪跑（播着 AVPlayer 才会一直往前缓冲），放在上层几乎透明
+        hd.isMuted = true
+        hd.automaticallyWaitsToMinimizeStalling = true
+        hd.currentItem?.preferredForwardBufferDuration = 0
+        hd.play()
+        hdPlayer = hd; hdVisible = false
+        // 低清：拿到一点数据就开播
+        let low = AVPlayer(playerItem: AVPlayerItem(asset: DYMedia.asset(f)))
+        low.automaticallyWaitsToMinimizeStalling = false
+        if resume.seconds > 1 { low.seek(to: resume) }
+        player = low
+        attachObservers(low)
+        low.isMuted = muted
+        low.play()
+        isPlaying = true
+        fastT0 = Date()
+        #if DEBUG
+        logSwipeStart(low, fast: true)
+        #endif
+        watchdog(low)
+        pollUpgrade(low, hd, 0)
+    }
+
+    /// 高清在 target 之后已缓冲多少秒（target 不在已缓冲区间里 → 0）
+    private func bufferedAhead(_ it: AVPlayerItem, from target: Double) -> Double {
+        for v in it.loadedTimeRanges {
+            let r = v.timeRangeValue
+            let s = r.start.seconds, e = (r.start + r.duration).seconds
+            if target >= s - 0.05 && target <= e { return e - target }
+        }
+        return 0
+    }
+
+    private func pollUpgrade(_ low: AVPlayer, _ hd: AVPlayer, _ n: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            guard isActive, player === low, hdPlayer === hd else { return }
+            guard let it = hd.currentItem, it.status != .failed else { cancelUpgrade(); return }
+            let t = low.currentTime().seconds
+            if it.status == .readyToPlay, !seeking, bufferedAhead(it, from: t + 0.1) >= 1.5 {
+                swapToHD(low, hd)
+            } else if n < 160 {
+                pollUpgrade(low, hd, n + 1)      // 最多等 40 秒；网太慢就一直看低清，不卡
+            } else {
+                cancelUpgrade()
+            }
+        }
+    }
+
+    private func swapToHD(_ low: AVPlayer, _ hd: AVPlayer) {
+        let target = low.currentTime() + CMTime(seconds: 0.08, preferredTimescale: 600)
+        hd.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { done in
+            DispatchQueue.main.async {
+                guard done, isActive, player === low, hdPlayer === hd else { return }
+                hd.rate = isPlaying ? max(low.rate, 1) : 0
+                // 等高清出两帧画面再盖上去，声音同时交接
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                    guard player === low, hdPlayer === hd else { return }
+                    withAnimation(.easeInOut(duration: 0.15)) { hdVisible = true }
+                    hd.isMuted = muted
+                    low.isMuted = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { finishUpgrade(low, hd) }
+                }
+            }
+        }
+    }
+
+    /// 底层也换成高清（上层还盖着，所以不会黑一下），再拆掉低清和上层
+    private func finishUpgrade(_ low: AVPlayer, _ hd: AVPlayer) {
+        guard player === low, hdPlayer === hd else { return }
+        detachObservers()
+        low.pause(); low.replaceCurrentItem(with: nil)
+        player = hd
+        attachObservers(hd)
+        #if DEBUG
+        ddWrite("DDUPGRADE \(id) 高清接管=\(String(format: "%.2f", Date().timeIntervalSince(fastT0)))s")
+        #endif
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            if hdPlayer === hd { hdPlayer = nil; hdVisible = false }
+        }
+    }
+
+    /// 秒开中途滑走：丢掉低清，把高清（停在同一时间点）留作这一页的播放器
+    private func revertToHD() {
+        guard let hd = hdPlayer, let low = player else { return }
+        let t = low.currentTime()
+        detachObservers()
+        low.pause(); low.replaceCurrentItem(with: nil)
+        hd.pause(); hd.isMuted = true
+        hd.seek(to: t)
+        player = hd
+        attachObservers(hd)
+        hdPlayer = nil; hdVisible = false
+    }
+
+    private func cancelUpgrade() {
+        guard let hd = hdPlayer else { return }
+        hd.pause(); hd.replaceCurrentItem(with: nil)
+        hdPlayer = nil; hdVisible = false
+    }
+
+    private func detachObservers() {
+        if let t = timeToken { player?.removeTimeObserver(t); timeToken = nil }
+        if let o = endObserver { NotificationCenter.default.removeObserver(o); endObserver = nil }
     }
 
     /// 起播看门狗：当前屏 6 秒还没走（网络抖 / 预加载的 item 失效），重建播放项再来一次
@@ -364,20 +812,26 @@ struct PlayerPage: View {
     }
 
     private func rebuild() {
+        cancelUpgrade()
         teardownPlayerOnly()
-        let item = AVPlayerItem(asset: DYMedia.asset(url))
+        #if DEBUG
+        ddWrite("DDREBUILD \(id) alt=\(altURL != nil)")
+        #endif
+        let item = makeItem(asset: DYMedia.asset(altURL ?? url))
         let p = AVPlayer(playerItem: item)
         p.automaticallyWaitsToMinimizeStalling = true
         player = p
         attachObservers(p)
-        p.isMuted = false
+        p.isMuted = muted
         p.play()
         isPlaying = true
         watchdog(p)
     }
 
-    /// 失焦/切后台：立即暂停并释放音频会话，声音一秒都不该多留
+    /// 失焦/切后台：短视频立即暂停。音频会话由 DDPlayback 统一释放，
+    /// 避免把仍在出声的直播会话一起拆掉。「后台播放」打开时这里直接返回。
     private func pauseForBackground() {
+        if DDPlayback.bgPlay { return }
         #if DEBUG
         ddWrite("DDBG pauseForBackground id=\(id) vlc=\(vlc != nil) av=\(player != nil) rate=\(player?.rate ?? -9) t=\(String(format: "%.1f", player?.currentTime().seconds ?? -1)) active=\(isActive)")
         #endif
@@ -389,10 +843,10 @@ struct PlayerPage: View {
             p.pause(); isPlaying = false
             onSavePosition(p.currentTime().seconds)
         }
+        hdPlayer?.pause()
         #if DEBUG
         ddWrite("DDBG pauseForBackground id=\(id) vlc=\(vlc != nil) av=\(player != nil) rate=\(player?.rate ?? -9) t=\(String(format: "%.1f", player?.currentTime().seconds ?? -1)) active=\(isActive)")
         #endif
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     /// 回到前台：还是当前条就接着播
@@ -401,10 +855,11 @@ struct PlayerPage: View {
         ddWrite("DDBG resumeAfterBackground id=\(id) active=\(isActive) av=\(player != nil) t=\(String(format: "%.1f", player?.currentTime().seconds ?? -1))")
         #endif
         guard isActive else { return }
+        guard DYResumePolicy.shouldResumeAfterBackground(userPaused: userPaused) else { return }
         if let v = vlc {
             try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
             try? AVAudioSession.sharedInstance().setActive(true)
-            v.mediaPlayer.audio?.isMuted = false
+            v.mediaPlayer.audio?.isMuted = muted
             v.mediaPlayer.play(); isPlaying = true
             return
         }
@@ -412,6 +867,7 @@ struct PlayerPage: View {
             try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
             try? AVAudioSession.sharedInstance().setActive(true)
             p.play(); isPlaying = true
+            hdPlayer?.play()      // 秒开中：高清继续静音陪跑缓冲
         }
     }
 
@@ -422,7 +878,11 @@ struct PlayerPage: View {
         if knownDuration > 0 { v.setKnownDuration(knownDuration) }
         v.onProgress = { pos in
             if !seeking { current = pos }
+            if !firstFrame, pos > 0.02 { firstFrame = true }
+            refreshNowPlaying(pos)
             if isActive { DDNowPlaying.id = id; DDNowPlaying.time = pos }
+            dmClock.sync(pos, playing: v.isPlaying && !seeking, rate: Double(v.mediaPlayer.rate))
+            if !rateBoost, v.isPlaying, v.mediaPlayer.rate != Float(effectiveRate) { v.setRate(Float(effectiveRate)) }
             if v.duration > 0 { duration = v.duration }
         }
         v.onEnd = { [weak v] in
@@ -443,13 +903,37 @@ struct PlayerPage: View {
         timeToken = p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { t in
             MainActor.assumeIsolated {
                 if !seeking { current = t.seconds }
+                if !firstFrame, t.seconds > 0.02 { firstFrame = true }
                 if isActive { DDNowPlaying.id = id; DDNowPlaying.time = t.seconds }
+                dmClock.sync(t.seconds, playing: p.rate > 0 && !seeking, rate: Double(p.rate))
+                refreshNowPlaying(t.seconds)
+                // 锁定倍速：play()/换播放器都会回到 1 倍，每 0.25s 拉回选定速度
+                if !rateBoost, p.rate > 0, p.rate != Float(effectiveRate) { p.rate = Float(effectiveRate) }
                 if let d = p.currentItem?.duration.seconds, d.isFinite, d > 0 { duration = d }
+                // 头部缓存 → 在线流：提前预热，到点直接交接（不等 ended，避免尾部没数据干等）
+                if let h = headEndSeconds, h > 0, !continued {
+                    if nextPlayer == nil, t.seconds > h - 4 { primeContinuation() }
+                    if t.seconds >= h - 0.12, let np = nextPlayer, np.currentItem?.status == .readyToPlay {
+                        DispatchQueue.main.async { if !continued { handOver(to: np, from: p, at: h, primed: true) } }
+                    }
+                    // 兜底：预估接续点比真实可播长度乐观时，头部数据会先耗尽（rate 掉 0、时间不动），
+                    // 这时候立刻交接，不让画面干等
+                    if isPlaying, !seeking, p.rate == 0, let np = nextPlayer, np.currentItem?.status == .readyToPlay {
+                        stalledTicks += 1
+                        if stalledTicks >= 4 {
+                            let at = max(t.seconds, 0.5)
+                            DispatchQueue.main.async { if !continued { handOver(to: np, from: p, at: at, primed: true) } }
+                        }
+                    } else {
+                        stalledTicks = 0
+                    }
+                }
             }
         }
         endObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification,
                                                              object: p.currentItem, queue: .main) { _ in
             MainActor.assumeIsolated {
+                if continueFromRemote(p) { return }
                 if let onEnded { onEnded() } else { p.seek(to: .zero); p.play() }   // 抖音同款：单条循环
             }
         }
@@ -463,17 +947,77 @@ struct PlayerPage: View {
         player = nil
     }
 
+    // MARK: 锁屏 / 控制中心播放控件（播放暂停、前进后退 10 秒、进度条、倍速）
+
+    private func bindRemote() {
+        let c = MPRemoteCommandCenter.shared()
+        // 没开「后台播放」就不要锁屏播放窗口：关掉所有控件并清掉「正在播放」
+        guard DDPlayback.bgPlay else {
+            [c.playCommand, c.pauseCommand, c.togglePlayPauseCommand, c.skipForwardCommand, c.skipBackwardCommand,
+             c.changePlaybackPositionCommand, c.changePlaybackRateCommand].forEach { $0.removeTarget(nil); $0.isEnabled = false }
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            DDRemoteOwner.id = ""
+            return
+        }
+        DDRemoteOwner.id = id
+        let now = { vlc?.current ?? player?.currentTime().seconds ?? current }
+        func on(_ cmd: MPRemoteCommand, _ f: @escaping (MPRemoteCommandEvent) -> Void) {
+            cmd.removeTarget(nil); cmd.isEnabled = true
+            cmd.addTarget { e in DispatchQueue.main.async { f(e) }; return .success }
+        }
+        on(c.playCommand) { _ in if !isPlaying { togglePlay() } }
+        on(c.pauseCommand) { _ in if isPlaying { togglePlay() } }
+        on(c.togglePlayPauseCommand) { _ in togglePlay() }
+        c.skipForwardCommand.preferredIntervals = [10]
+        c.skipBackwardCommand.preferredIntervals = [10]
+        on(c.skipForwardCommand) { _ in seekTo(min(max(duration, 1), now() + 10)) }
+        on(c.skipBackwardCommand) { _ in seekTo(max(0, now() - 10)) }
+        on(c.changePlaybackPositionCommand) { e in
+            if let e = e as? MPChangePlaybackPositionCommandEvent { seekTo(e.positionTime) }
+        }
+        c.changePlaybackRateCommand.supportedPlaybackRates = [0.75, 1, 1.25, 1.5, 2]
+        on(c.changePlaybackRateCommand) { e in
+            if let e = e as? MPChangePlaybackRateCommandEvent {
+                // 锁屏/控制中心改的速度算「本条视频」：不污染设置里的全局速度
+                if e.playbackRate >= 2 { lockedBoost = true } else { lockedBoost = false; playbackRate = Double(e.playbackRate) }
+            }
+        }
+        lastNowPlaying = -10
+        refreshNowPlaying(now())
+    }
+
+    /// 约每秒刷新一次锁屏上的标题 / 进度 / 速度
+    private func refreshNowPlaying(_ t: Double) {
+        guard isActive, abs(t - lastNowPlaying) >= 1 else { return }
+        lastNowPlaying = t
+        // 开关中途被切换：开了就补绑控件，关了就清掉
+        if DDPlayback.bgPlay != (DDRemoteOwner.id == id) { bindRemote(); if !DDPlayback.bgPlay { return } }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+            MPMediaItemPropertyTitle: title.isEmpty ? "DouDuo" : title,
+            MPMediaItemPropertyPlaybackDuration: duration,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: t,
+            // 锁屏报实际在跑的速度（长按临时 2 倍、本条锁定 2 倍都算），不是设置里的全局速度
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? (rateBoost || lockedBoost ? 2 : playbackRate) : 0,
+            MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
+        ]
+    }
+
     private func togglePlay() {
-        if let v = vlc { v.togglePlay(); isPlaying = v.isPlaying; return }
+        defer { lastNowPlaying = -10; refreshNowPlaying(vlc?.current ?? player?.currentTime().seconds ?? current) }   // 锁屏上的播放/暂停状态马上跟上
+        if let v = vlc { v.togglePlay(); isPlaying = v.isPlaying; userPaused = !isPlaying; dmClock.sync(v.current, playing: v.isPlaying, rate: 1); return }
         guard let p = player else { return }
         if isPlaying { p.pause() } else { p.play() }
         isPlaying.toggle()
+        userPaused = !isPlaying
+        dmClock.sync(p.currentTime().seconds, playing: isPlaying, rate: Double(max(p.rate, 1)))
     }
 
     private func seekTo(_ pos: Double) {
+        dmClock.sync(pos, playing: isPlaying, rate: rateBoost || lockedBoost ? 2 : playbackRate)
         if let v = vlc { v.seekTo(pos); current = pos; return }
         let tol = CMTime(seconds: 0.5, preferredTimescale: 600)
         player?.seek(to: CMTime(seconds: pos, preferredTimescale: 600), toleranceBefore: tol, toleranceAfter: tol)
+        hdPlayer?.seek(to: CMTime(seconds: pos, preferredTimescale: 600), toleranceBefore: tol, toleranceAfter: tol)
         current = pos
     }
 
@@ -491,10 +1035,12 @@ struct PlayerPage: View {
     }
 
     private func teardown() {
+        cancelUpgrade()
         if let v = vlc { onSavePosition(v.current); v.onEnd = nil; v.onProgress = nil; v.stop(); vlc = nil }
         if let p = player { onSavePosition(p.currentTime().seconds) }
         if let t = timeToken { player?.removeTimeObserver(t); timeToken = nil }
         if let o = endObserver { NotificationCenter.default.removeObserver(o); endObserver = nil }
+        if let np = nextPlayer { np.pause(); np.replaceCurrentItem(with: nil); nextPlayer = nil }
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         player = nil
@@ -524,18 +1070,32 @@ func ddWrite(_ s: String) {
 struct VideoSurface: UIViewRepresentable {
     let player: AVPlayer
     var fillWidth: Bool = true
+    /// 画面层第一次有帧可显示时回调（先按同向规则定好铺满方式再回调，不会先小后跳）
+    var onReady: (() -> Void)? = nil
     func makeUIView(context: Context) -> PlayerUIView {
-        let v = PlayerUIView(player: player); v.fillWidth = fillWidth; v.watchSize(); return v
+        let v = PlayerUIView(player: player)
+        v.fillWidth = fillWidth
+        v.onReady = onReady
+        // 初始用 fit；真正的铺满由 applyGravity 按「是否同向」决定（surface 首帧前隐藏，看不到这中间态）
+        v.playerLayer.videoGravity = .resizeAspect
+        v.watchSize()
+        return v
     }
     func updateUIView(_ uiView: PlayerUIView, context: Context) {
-        if uiView.playerLayer.player !== player { uiView.playerLayer.player = player }
+        if uiView.detached == nil, uiView.playerLayer.player !== player { uiView.playerLayer.player = player; uiView.watchSize() }
         uiView.fillWidth = fillWidth
+        uiView.onReady = onReady
         uiView.applyGravity()
     }
 }
 
 final class PlayerUIView: UIView {
     var fillWidth = true
+    var onReady: (() -> Void)?
+    private var readyObs: NSKeyValueObservation?
+    /// 后台播放：进后台前把 player 从画面层摘下，系统才不会因「视频不可见」把声音一起停掉；回前台再挂回
+    var detached: AVPlayer?
+    private var bgObs: [NSObjectProtocol] = []
     override static var layerClass: AnyClass { AVPlayerLayer.self }
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
     init(player: AVPlayer) {
@@ -543,8 +1103,25 @@ final class PlayerUIView: UIView {
         playerLayer.player = player
         playerLayer.videoGravity = .resizeAspect
         backgroundColor = .black
+        let nc = NotificationCenter.default
+        bgObs = [
+            nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+                guard DDPlayback.bgPlay, let self, let p = self.playerLayer.player else { return }
+                p.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
+                self.detached = p; self.playerLayer.player = nil
+            },
+            nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+                guard let self, let p = self.detached else { return }
+                self.playerLayer.player = p; self.detached = nil
+            },
+        ]
+        readyObs = playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self] layer, _ in
+            guard layer.isReadyForDisplay else { return }
+            DispatchQueue.main.async { self?.applyGravity(); self?.onReady?() }
+        }
     }
     required init?(coder: NSCoder) { fatalError() }
+    deinit { bgObs.forEach(NotificationCenter.default.removeObserver) }
 
     /// 自适应（仅同向时）：竖屏看竖屏铺满宽度；横屏看横屏铺满高度。竖屏看横屏保持原样。
     /// presentationSize 要等 readyToPlay 才有值，所以 layoutSubviews + KVO 都刷一次。
@@ -562,16 +1139,23 @@ final class PlayerUIView: UIView {
         guard let size = playerLayer.player?.currentItem?.presentationSize, size.width > 1, size.height > 1,
               bounds.width > 1, bounds.height > 1 else { return }
         let video = size.width / size.height, screen = bounds.width / bounds.height
-        // 只有「视频和屏幕同向」时才放大铺满：竖屏看竖屏 → 铺满宽度；横屏看横屏 → 铺满高度。
-        // 竖屏看横屏（或反之）保持完整画面不动，否则会裁掉一大块。
+        // 「自动铺满宽度」只在视频和屏幕同向时铺满（竖屏看竖屏 / 横屏看横屏）；
+        // 竖屏看横屏保持完整画面，不裁掉两侧。
         let sameOrientation = (video < 1) == (screen < 1)
+        let crop = 1 - min(video, screen) / max(video, screen)
         let g: AVLayerVideoGravity = (fillWidth && sameOrientation) ? .resizeAspectFill : .resizeAspect
         #if DEBUG
         if playerLayer.videoGravity != g {
-            ddWrite("DDGRAVITY video=\(String(format: "%.2f", video)) screen=\(String(format: "%.2f", screen)) bounds=\(bounds.size) fill=\(fillWidth) same=\(sameOrientation) -> \(g == .resizeAspectFill ? "FILL" : "FIT")")
+            ddWrite("DDGRAVITY video=\(String(format: "%.2f", video)) screen=\(String(format: "%.2f", screen)) bounds=\(bounds.size) fill=\(fillWidth) same=\(sameOrientation) crop=\(String(format: "%.2f", crop)) -> \(g == .resizeAspectFill ? "FILL" : "FIT")")
         }
         #endif
         if playerLayer.videoGravity != g { playerLayer.videoGravity = g }
     }
 }
 
+
+/// 回到前台的续播规则：只有「被后台/失焦打断」才自动续播。
+/// 用户自己按的暂停是明确意图，不能被生命周期回调覆盖。
+enum DYResumePolicy {
+    static func shouldResumeAfterBackground(userPaused: Bool) -> Bool { !userPaused }
+}
