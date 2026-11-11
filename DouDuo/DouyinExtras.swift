@@ -802,13 +802,13 @@ struct DYListPlayer: View {
     private var current: DYAweme? { items.first { $0.id == currentID } }
 
     var body: some View {
-        GeometryReader { geo in
+        DYCommentPlayerLayout(bridge: bridge, aweme: current, showComments: $showComments, focus: commentFocus) { insets in
             ZStack(alignment: .topLeading) {
                 Color.black.ignoresSafeArea()
                 ScrollView(.vertical) {
                     LazyVStack(spacing: 0) {
                         ForEach(items) { item in
-                            DYVideoPage(item: item, isCurrent: item.id == currentID, insets: geo.safeAreaInsets,
+                            DYVideoPage(item: item, isCurrent: item.id == currentID, insets: insets,
                                         resume: resume[item.id], liked: liked.contains(item.id), collected: collected.contains(item.id),
                                         onLike: { toggleLike(item.id, force: nil) }, onCollect: { toggleCollect(item.id) },
                                         onDoubleTap: { toggleLike(item.id, force: true) },
@@ -837,14 +837,9 @@ struct DYListPlayer: View {
                         .allowsHitTesting(false)
                 }
             }
-            .sheet(isPresented: $showComments) {
-                if let cur = current {
-                    DYCommentPanel(bridge: bridge, aweme: cur, onClose: { showComments = false }, focus: commentFocus)
-                        // 竖屏锁死半屏：不给 .large，上滑不能把评论区撑满整屏
-                        .presentationDetents([.fraction(0.62)])
-                }
-            }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("douyin.list.player")
         .onChange(of: currentID) { old, new in
             if new == nil, let old { currentID = old; return }
             guard let i = items.firstIndex(where: { $0.id == new }) else { return }
@@ -1167,7 +1162,7 @@ struct DYMineScreen: View {
     var body: some View {
         NavigationStack {
             content
-                .modifier(DYDockToolbar(tab: .mine))
+                .modifier(DYSystemTabBar())
                 .navigationTitle(user?.name ?? "我的")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
@@ -1207,6 +1202,15 @@ struct DYMineScreen: View {
         }
         .background(Color.black.ignoresSafeArea())
         .task {
+            #if DEBUG
+            // UI-only entry fixture: a real public work, never a fake account list.
+            if ProcessInfo.processInfo.environment["DOUDUO_COMMENT_ENTRY"] == "mine",
+               let id = ProcessInfo.processInfo.environment["DOUDUO_VIDEO_ID"],
+               let item = try? await bridge.awemeDetail(id) {
+                open = DYListTarget(title: "评论布局回归", items: [item], start: 0, model: nil)
+                return
+            }
+            #endif
             do { user = try await bridge.selfProfile() } catch { userErr = error.localizedDescription }
         }
         .onAppear { ensure(kind) }
@@ -1221,6 +1225,9 @@ struct DYMineScreen: View {
     }
 
     private func ensure(_ k: DYListKind) {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["DOUDUO_COMMENT_ENTRY"] == "mine" { return }
+        #endif
         guard models[k] == nil else { return }
         let m = DYPagedModel { [bridge] cur in try await bridge.myList(k, cursor: cur) }
         models[k] = m
@@ -1479,7 +1486,9 @@ struct DYFollowFeed: View {
     let onAuthor: (DYAweme) -> Void
     let onLogin: () -> Void
     let onToast: (String) -> Void
+    let onComments: (DYAweme) -> Void
     var onLive: (DYLiveRoom) -> Void = { _ in }
+    var onShowRecommendations: (() -> Void)? = nil
     @Environment(\.horizontalSizeClass) private var hSize
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var scheme
@@ -1492,7 +1501,6 @@ struct DYFollowFeed: View {
     @State private var resume: [String: Double] = [:]
     @State private var liked: Set<String> = []
     @State private var collected: Set<String> = []
-    @State private var showComments = false
 
     var body: some View {
         let m = model.model(bridge)
@@ -1522,10 +1530,11 @@ struct DYFollowFeed: View {
                                         resume: resume[item.id], liked: liked.contains(item.id) || item.userDigged == 1,
                                         collected: collected.contains(item.id) || item.isCollect == 1,
                                         onLike: { like(item.id, force: nil) }, onCollect: { collect(item.id) },
-                                        onDoubleTap: { like(item.id, force: true) }, onComments: { showComments = true },
+                                        onDoubleTap: { like(item.id, force: true) }, onComments: { onComments(item) },
                                         onSearch: {},
                                         onAuthor: { onAuthor(item) }, onSavePosition: { resume[item.id] = $0 },
-                                        preloader: preloader, bridge: bridge, onToast: onToast)
+                                        preloader: preloader, bridge: bridge, onToast: onToast,
+                                        onNavigateLeft: onShowRecommendations)
                                 .containerRelativeFrame([.horizontal, .vertical])
                                 .id(item.id)
                         }
@@ -1538,17 +1547,27 @@ struct DYFollowFeed: View {
                 .ignoresSafeArea()
             }
         }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("douyin.follow.feed")
+        .simultaneousGesture(DragGesture(minimumDistance: 40).onEnded { value in
+            guard m.items.isEmpty, value.translation.width < -60,
+                  abs(value.translation.width) > abs(value.translation.height) * 1.2 else { return }
+            onShowRecommendations?()
+        })
         .overlay(alignment: .top) {
             if !liveNow.isEmpty { liveRow.padding(.top, (hSize == .regular ? 20 : 80) + 52) }
         }
-        .sheet(isPresented: $showComments) {
-            if let cur = m.items.first(where: { $0.id == currentID }) {
-                DYCommentPanel(bridge: bridge, aweme: cur, onClose: { showComments = false })
-                    // 竖屏锁死半屏：不给 .large，上滑不能把评论区撑满整屏
-                    .presentationDetents([.fraction(0.62)])
-            }
-        }
         .task {
+            #if DEBUG
+            // Exercise the real following player without requiring an account.
+            if ProcessInfo.processInfo.environment["DOUDUO_COMMENT_ENTRY"] == "follow",
+               let id = ProcessInfo.processInfo.environment["DOUDUO_VIDEO_ID"],
+               let item = try? await bridge.awemeDetail(id) {
+                m.items = [item]; m.hasMore = false; currentID = item.id
+                return
+            }
+            #endif
             Task { await loadLiveNow() }
             if m.items.isEmpty { await m.loadMore() }
             if currentID == nil { currentID = m.items.first?.id }

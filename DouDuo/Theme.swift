@@ -12,6 +12,8 @@ struct DDColor {
 enum DDFontSize { case caption, body, headline, title, displayLarge, splash }
 
 struct DDTheme {
+    static let sheetCornerRadius: CGFloat = 32
+
     struct Media {
         let scrim = DDColor(.black.opacity(0.35))
         let strongScrim = DDColor(.black)

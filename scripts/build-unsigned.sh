@@ -20,7 +20,7 @@ app = stage / 'Payload/DouDuo.app'
 with (app / 'Info.plist').open('rb') as f:
     info = plistlib.load(f)
 assert info['CFBundleShortVersionString'] == '1.3.11', info
-assert info['CFBundleVersion'] == '89', info
+assert info['CFBundleVersion'] == '90', info
 assert info['CFBundleIdentifier'] == 'com.zenghongjvn.douduo', info
 assert info['MinimumOSVersion'] == '27.1', info
 assert info['UIDeviceFamily'] == [1], info
@@ -42,7 +42,7 @@ for signature in app.rglob('_CodeSignature'):
 for profile in app.rglob('embedded.mobileprovision'):
     profile.unlink()
 PY
-artifact="$PWD/output/DouDuo-1.3.11-build89-Duo-unsigned.ipa"
+artifact="$PWD/output/DouDuo-1.3.11-build90-Duo-unsigned.ipa"
 (cd "$stage" && /usr/bin/ditto -c -k --norsrc --keepParent Payload "$artifact")
 unzip -tq "$artifact"
 (cd output && shasum -a 256 "$(basename "$artifact")" > "$(basename "$artifact").sha256")

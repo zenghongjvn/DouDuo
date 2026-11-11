@@ -119,104 +119,97 @@ enum DYReservedNudge {
     }
 }
 
-// MARK: - ArrangementView 主面板
+// MARK: - Shared comments presentation
 
-/// zIndex > 0：平放 / 外屏，面板浮在视频上，维持「点了才出」。
-/// zIndex == 0：半折叠，系统把 primary 分到 trailing / 底部，面板常驻。
-@available(iOS 27.1, *)
-struct DYDuoCommentPrimary: View {
-    @Environment(\.overlayArrangementZIndex) private var zIndex
-    @Environment(\.horizontalSizeClass) private var hSize
+/// Every compact-screen entry uses the same system sheet and one glass surface.
+struct DYCommentSheet: View {
     let bridge: DouyinBridge
-    let aweme: DYAweme?
-    let showComments: Bool
+    let aweme: DYAweme
     let onClose: () -> Void
-    let onAuthor: () -> Void
+    var focus: DYCommentFocus? = nil
 
     var body: some View {
-        if zIndex == 0 {
-            resident
-        } else if hSize == .regular, showComments, let aweme {
-            sidePanel(aweme)
-        }
-    }
-
-    private var resident: some View {
-        VStack(spacing: 0) {
-            if let aweme {
-                authorBar(aweme)
-                DYCommentPanel(bridge: bridge, aweme: aweme, onClose: nil)
-                    .id(aweme.id)
-            } else {
-                ContentUnavailableView("还没有视频", systemImage: "play.rectangle", description: Text("推荐流加载后，这里显示作者和评论"))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(GlassBackground())
-        .modifier(DYRailReservedNudge())
-    }
-
-    private func authorBar(_ aweme: DYAweme) -> some View {
-        Button(action: onAuthor) {
-            HStack(spacing: 10) {
-                CachedAsyncImage(url: aweme.author.avatar.flatMap(URL.init(string:))) { img in
-                    img.resizable().scaledToFill()
-                } placeholder: {
-                    Color.primary.opacity(0.08)
-                }
-                .frame(width: 36, height: 36)
-                .clipShape(Circle())
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(aweme.author.name.isEmpty ? "作者" : aweme.author.name)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.themeTextPrimary)
-                    if !aweme.desc.isEmpty {
-                        Text(aweme.desc).font(.caption).foregroundStyle(.themeTextSecondary).lineLimit(2)
-                    }
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("douyin.duo.author")
-    }
-
-    private func sidePanel(_ aweme: DYAweme) -> some View {
-        GeometryReader { geo in
-            HStack(spacing: 0) {
-                Color.clear
-                    .frame(maxWidth: .infinity)
-                    .allowsHitTesting(false)
-                DYCommentPanel(bridge: bridge, aweme: aweme, onClose: onClose)
-                    .frame(width: min(380, geo.size.width * 0.36))
-                    .id(aweme.id)
-            }
-        }
-        .transition(.move(edge: .trailing))
+        DYCommentPanel(bridge: bridge, aweme: aweme, onClose: onClose, focus: focus)
+            .toolbarVerticalBehavior(.disabled)
+            .presentationDetents([.fraction(0.62)])
+            .presentationCornerRadius(DDTheme.sheetCornerRadius)
+            .presentationDragIndicator(.visible)
     }
 }
 
-/// 外屏（非 regular）评论走系统 sheet，挂在 ArrangementView 外面，避免 sheet 被姿态容器吃掉。
-struct DYOuterCommentSheet: ViewModifier {
-    @Environment(\.horizontalSizeClass) private var hSize
-    @Binding var showComments: Bool
-    let aweme: DYAweme?
-    let bridge: DouyinBridge
+/// Shared geometry for recommendation, following, profile/search works and
+/// comment links from messages. Changing pane size never replaces the pager.
+struct DYCommentPaneMetrics {
+    let resident: Bool
+    let sideBySide: Bool
+    let showsPane: Bool
+    let videoSize: CGSize
+    let paneSize: CGSize
+    let paneOrigin: CGPoint
+    let trailingInset: CGFloat
 
-    func body(content: Content) -> some View {
-        content.sheet(isPresented: Binding(
-            get: { showComments && hSize != .regular && aweme != nil },
-            set: { showComments = $0 }
-        )) {
-            if let aweme {
-                DYCommentPanel(bridge: bridge, aweme: aweme, onClose: { showComments = false })
-                    // 竖屏锁死半屏：不给 .large，上滑不能把评论区撑满整屏
-                    .presentationDetents([.fraction(0.62)])
-                    .presentationDragIndicator(.visible)
+    init(_ geo: GeometryProxy, isPresented: Bool, allowsResident: Bool = true) {
+        let w = geo.size.width, h = geo.size.height
+        resident = allowsResident && DYDuoMetrics.foldIsActive(geo)
+        let tableFold = resident && w <= h
+        sideBySide = w >= DYDuoMetrics.legacyWideMin || (resident && w > h)
+        showsPane = resident || (sideBySide && isPresented)
+        let paneW = showsPane && sideBySide ? w * 0.5 : 0
+        let paneH = tableFold ? h * 0.45 : 0
+        videoSize = CGSize(width: w - paneW, height: h - paneH)
+        trailingInset = geo.safeAreaInsets.trailing
+        // Keyboard insets must not be added back to the panel height. Keep the
+        // input above the keyboard while the background reaches the screen edge.
+        let containerBottom = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+            .first(where: \.isKeyWindow)?.safeAreaInsets.bottom ?? 0
+        let bottom = min(geo.safeAreaInsets.bottom, containerBottom)
+        paneSize = CGSize(width: sideBySide ? paneW + trailingInset : w,
+                          height: tableFold ? paneH : h + geo.safeAreaInsets.top + bottom)
+        paneOrigin = CGPoint(x: sideBySide ? videoSize.width : 0,
+                             y: tableFold ? videoSize.height : -geo.safeAreaInsets.top)
+    }
+}
+
+/// Used by the list player opened from My, author/search grids and message links.
+struct DYCommentPlayerLayout<Video: View>: View {
+    let bridge: DouyinBridge
+    let aweme: DYAweme?
+    @Binding var showComments: Bool
+    var focus: DYCommentFocus? = nil
+    @ViewBuilder var video: (EdgeInsets) -> Video
+
+    var body: some View {
+        GeometryReader { geo in
+            let layout = DYCommentPaneMetrics(geo, isPresented: showComments)
+            ZStack(alignment: .topLeading) {
+                video(geo.safeAreaInsets)
+                    .environment(\.duoInlineVideoNavigation, layout.showsPane)
+                    .frame(width: layout.videoSize.width, height: layout.videoSize.height)
+                if layout.showsPane, let aweme {
+                    DYCommentPanel(bridge: bridge, aweme: aweme,
+                                   onClose: layout.resident ? nil : { showComments = false },
+                                   focus: focus, fillsPane: true,
+                                   trailingInset: layout.trailingInset)
+                        .id(aweme.id)
+                        .frame(width: layout.paneSize.width, height: layout.paneSize.height)
+                        .clipped()
+                        .overlay(alignment: .leading) { if layout.sideBySide { Divider() } }
+                        .offset(x: layout.paneOrigin.x, y: layout.paneOrigin.y)
+                }
+            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+            .background(Color.black.ignoresSafeArea())
+            .animation(.snappy, value: showComments)
+            .animation(.snappy, value: layout.resident)
+            .sheet(isPresented: Binding(
+                get: { showComments && !layout.sideBySide && !layout.resident && aweme != nil },
+                set: { if !layout.sideBySide && !layout.resident { showComments = $0 } }
+            )) {
+                if let aweme {
+                    DYCommentSheet(bridge: bridge, aweme: aweme,
+                                   onClose: { showComments = false }, focus: focus)
+                }
             }
         }
     }

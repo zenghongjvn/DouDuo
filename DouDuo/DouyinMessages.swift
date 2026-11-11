@@ -363,7 +363,7 @@ struct DYMessagesScreen: View {
     var body: some View {
         NavigationStack {
             messageContent
-                .modifier(DYDockToolbar(tab: .messages))
+                .modifier(DYSystemTabBar())
                 .navigationTitle(sidebarVisible ? "" : "消息")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
@@ -1789,8 +1789,12 @@ struct DYForwardPresentation: ViewModifier {
     @State private var showing = false
     func body(content: Content) -> some View {
         content.environment(\.dyForwardAction, { showing = true })
-            .fullScreenCover(isPresented: $showing) {
-                DYForwardScreen(item: item).presentationBackground(.clear)
+            .sheet(isPresented: $showing) {
+                DYForwardScreen(item: item)
+                    .toolbarVerticalBehavior(.disabled)
+                    .presentationDetents([.height(430), .large])
+                    .presentationDragIndicator(.hidden)
+                    .presentationCornerRadius(DDTheme.sheetCornerRadius)
             }
     }
 }
@@ -1823,10 +1827,11 @@ struct DYForwardScreen: View {
     @State private var query = ""
     @State private var showLogin = false
     @State private var showOtherApps = false
+    @State private var copiedLink = false
 
     private var actions: [DYForwardPanelAction] {
         var result: [DYForwardPanelAction] = []
-        if !model.contacts.isEmpty { result.append(.init(id: "private", title: "私信", symbol: "paperplane.fill")) }
+        if !model.contacts.isEmpty { result.append(.init(id: "private", title: "私信好友", symbol: "paperplane.fill")) }
         if model.contacts.contains(where: { $0.kind == 2 }) { result.append(.init(id: "groups", title: "分享至群", symbol: "person.2.fill")) }
         result.append(.init(id: "copy", title: "复制链接", symbol: "link"))
         result.append(.init(id: "other", title: "其他分享", symbol: "square.and.arrow.up"))
@@ -1838,16 +1843,14 @@ struct DYForwardScreen: View {
         model.contacts.filter { (!groupsOnly || $0.kind == 2) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) }
     }
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                theme.media.strongScrim.color(for: scheme).opacity(0.24).ignoresSafeArea()
-                    .onTapGesture { if !model.sending { dismiss() } }
-                DYNativeForwardPanel(contacts: accountPrepared ? model.contacts : [], loading: !accountPrepared || model.loading || model.sending,
-                                     status: accountPrepared ? model.message : "正在恢复朋友缓存…", actions: accountPrepared ? actions : [],
-                                     onContact: { if !model.sending { selected = $0 } },
-                                     onAction: perform, onClose: { if !model.sending { dismiss() } })
-                    .frame(width: max(0, min(560, geo.size.width - 32)))
-                // 挂载真实官方分享组件，保留React事件与鉴权，但不让网页进入用户界面或无障碍树。
+        DYNativeForwardPanel(contacts: accountPrepared ? model.contacts : [], loading: !accountPrepared || model.loading || model.sending,
+                             status: accountPrepared ? (copiedLink ? "链接已复制" : model.message) : "正在加载朋友…", actions: accountPrepared ? actions : [],
+                             onContact: { if !model.sending { selected = $0 } },
+                             onAction: perform, onClose: { if !model.sending { dismiss() } })
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background {
+                // Only the system sheet draws glass. Keep the signing/sending
+                // bridge hidden and preserve its real official account context.
                 if accountPrepared && !model.layoutFixture {
                     DYForwardWebContainer(model: model, url: item.webURL)
                         .id(model.accountScope)
@@ -1856,9 +1859,12 @@ struct DYForwardScreen: View {
                         .allowsHitTesting(false).accessibilityHidden(true)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
         .interactiveDismissDisabled(model.sending)
+        .task(id: copiedLink) {
+            guard copiedLink else { return }
+            do { try await Task.sleep(for: .seconds(3)) } catch { return }
+            copiedLink = false
+        }
         .alert("确认转发", isPresented: Binding(get: { selected != nil }, set: { if !$0 { selected = nil } })) {
             if let target = selected {
                 Button("发送") { selected = nil; Task { await model.send(to: target, itemURL: item.webURL) } }
@@ -1905,7 +1911,7 @@ struct DYForwardScreen: View {
         guard !model.sending else { return }
         switch action {
         case "private", "groups": groupsOnly = action == "groups"; query = ""; showContacts = true
-        case "copy": UIPasteboard.general.url = item.webURL; model.message = "链接已复制"
+        case "copy": UIPasteboard.general.url = item.webURL; copiedLink = true
         case "other": showOtherApps = true
         case "login": showLogin = true
         case "retry": model.web?.reload()

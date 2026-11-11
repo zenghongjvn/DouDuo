@@ -255,10 +255,156 @@ struct PlayerPage: View {
     @State private var stalledTicks = 0
     @State private var fastT0 = Date()
     private let playbackID = UUID()
+    @State private var videoScale: CGFloat = 1
+    @State private var pinchStartScale: CGFloat = 1
 
     var body: some View {
         ZStack {
             Color.black
+            if videoScale < 1, let posterURL {
+                GeometryReader { geometry in
+                    CachedAsyncImage(url: posterURL) { image in
+                        image.resizable().scaledToFill()
+                    } placeholder: { Color.black }
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .blur(radius: 28)
+                    .overlay(Color.black.opacity(0.25))
+                    .clipped()
+                }
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+            }
+            videoPlane
+                .mask {
+                    GeometryReader { geometry in
+                        let size = geometry.size
+                        let screenAspect = size.width / max(size.height, 1)
+                        let aspect = videoAspect > 0 ? videoAspect : screenAspect
+                        let fills = fillWidth && ((aspect < 1) == (screenAspect < 1))
+                        let fitted = aspect > screenAspect
+                            ? CGSize(width: size.width, height: size.width / aspect)
+                            : CGSize(width: size.height * aspect, height: size.height)
+                        Rectangle()
+                            .frame(width: videoScale < 1 && !fills ? fitted.width : size.width,
+                                   height: videoScale < 1 && !fills ? fitted.height : size.height)
+                            .position(x: size.width / 2, y: size.height / 2)
+                    }
+                }
+                .scaleEffect(videoScale)
+                .allowsHitTesting(false)
+            if isActive && (!danmaku.isEmpty || dmStress) {
+                DYDanmakuLayer(items: danmaku, clock: dmClock, topInset: topInset)
+            }
+            // 手势层铺满整页（含视频上下黑边）：横滑快进 / 单击 / 双击 / 长按，竖滑漏给分页
+            if player != nil || vlc != nil { gestures.padding(chromeInsets) }
+            #if DEBUG
+            Text(String(format: "%.2f", videoScale)).font(.caption2).opacity(0.01)
+                .accessibilityIdentifier("douyin.video.zoom")
+                .allowsHitTesting(false)
+            #endif
+            if seeking { seekHUD }
+            if isActive && !isPlaying && (player != nil || vlc != nil) && !seeking {
+                Image(systemName: "play.fill").font(.system(size: 52 * ui)).foregroundStyle(.white.opacity(0.75))
+                    .allowsHitTesting(false)
+            }
+            // 常驻倍速角标：只要不是 1 倍就一直显示；长按时再提示「下滑锁定 / 上滑取消」
+            if effectiveRate != 1 || rateBoost {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(rateText(effectiveRate)).font(.caption.weight(.bold)).monospacedDigit()
+                        .accessibilityIdentifier("douyin.rateBadge")
+                    if rateBoost {
+                        Text(lockedBoost ? "上滑取消倍速" : "下滑锁定倍速")
+                            .font(.system(size: 9)).opacity(0.85)
+                    } else if lockedBoost {
+                        Text("已锁定本条 · 长按上滑取消").font(.system(size: 9)).opacity(0.85)
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 9).padding(.vertical, 5)
+                .background(Capsule().fill(.black.opacity(0.45)))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.leading, 14).padding(.top, 66 * ui)
+                .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if isActive {
+                progressBar
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("视频进度")
+                    .accessibilityValue("\(Int(current.isFinite ? current : 0)) / \(Int(duration.isFinite ? duration : 0)) 秒")
+                    .accessibilityIdentifier("douyin.progress")
+                    .padding(chromeInsets)
+                    .padding(.bottom, max(bottomInset - 24, 0))
+            }
+        }
+        .clipped()
+        .sensoryFeedback(.impact(weight: .light), trigger: rateBoost) { old, new in !old && new }
+        .onAppear {
+            if player == nil { setup() }
+            if isActive { bindRemote() }
+            DDPlayback.shared.register(playbackID, stop: { pauseForBackground() }, start: { resumeAfterBackground() })
+        }
+        .onDisappear {
+            DDPlayback.shared.unregister(playbackID)
+            teardown()
+        }
+        // 切后台 / 来电 / 下拉控制中心立刻停声（否则退出 App 声音还在响）
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            pauseForBackground()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+            pauseForBackground()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            resumeAfterBackground()
+        }
+        .onChange(of: muted) { _, m in
+            guard isActive else { return }
+            player?.isMuted = m
+            vlc?.mediaPlayer.audio?.isMuted = m
+        }
+        // 设置里改播放速度 = 明确要这个速度：撤掉本条的长按锁定，当前视频立刻生效
+        .onChange(of: playbackRate) { _, newRate in
+            if !rateBoost { lockedBoost = false }
+            let target = rateBoost ? 2 : newRate
+            if let v = vlc { v.setRate(Float(target)) }
+            else if let p = player, isPlaying { p.rate = Float(target) }
+        }
+        .onChange(of: isActive) { _, active in
+            if !active { lockedBoost = false; videoScale = 1; pinchStartScale = 1 }   // 滑走就解锁：只锁「当前这条」
+            if active { bindRemote() }
+            if let v = vlc {
+                if active { v.mediaPlayer.audio?.isMuted = muted; v.mediaPlayer.play(); isPlaying = true }
+                else { v.mediaPlayer.pause(); isPlaying = false; onSavePosition(v.current) }
+                return
+            }
+            if !active && hdPlayer != nil { revertToHD() }   // 秒开中途滑走：留下高清那个，回来接着用
+            guard let p = player else { if active { setup() }; return }
+            if active, p.currentItem == nil || p.currentItem?.status == .failed { rebuild(); return }
+            if active, shouldFastStart(p) {
+                try? AVAudioSession.sharedInstance().setCategory(.playback)
+                try? AVAudioSession.sharedInstance().setActive(true)
+                startFast(hd: p)
+                return
+            }
+            if active {
+                try? AVAudioSession.sharedInstance().setCategory(.playback)
+                try? AVAudioSession.sharedInstance().setActive(true)
+                #if DEBUG
+                logSwipeStart(p)
+                #endif
+                p.isMuted = muted; p.play(); isPlaying = true
+                watchdog(p)
+            } else {
+                p.isMuted = true; p.pause(); isPlaying = false
+                onSavePosition(p.currentTime().seconds)
+            }
+        }
+    }
+
+    private var videoPlane: some View {
+        ZStack {
             if let vlc {
                 // 画面铺到屏幕边缘（状态栏/底部安全区也盖住）：跟抖音原生一样，不留上下黑边
                 VLCPlayerSurface(controller: vlc, fillWidth: fillWidth).ignoresSafeArea()
@@ -298,107 +444,6 @@ struct PlayerPage: View {
                 }
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
-            }
-            if isActive && (!danmaku.isEmpty || dmStress) {
-                DYDanmakuLayer(items: danmaku, clock: dmClock, topInset: topInset)
-            }
-            // 手势层铺满整页（含视频上下黑边）：横滑快进 / 单击 / 双击 / 长按，竖滑漏给分页
-            if player != nil || vlc != nil { gestures }
-            if seeking { seekHUD }
-            if isActive && !isPlaying && (player != nil || vlc != nil) && !seeking {
-                Image(systemName: "play.fill").font(.system(size: 52 * ui)).foregroundStyle(.white.opacity(0.75))
-                    .allowsHitTesting(false)
-            }
-            // 常驻倍速角标：只要不是 1 倍就一直显示；长按时再提示「下滑锁定 / 上滑取消」
-            if effectiveRate != 1 || rateBoost {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(rateText(effectiveRate)).font(.caption.weight(.bold)).monospacedDigit()
-                        .accessibilityIdentifier("douyin.rateBadge")
-                    if rateBoost {
-                        Text(lockedBoost ? "上滑取消倍速" : "下滑锁定倍速")
-                            .font(.system(size: 9)).opacity(0.85)
-                    } else if lockedBoost {
-                        Text("已锁定本条 · 长按上滑取消").font(.system(size: 9)).opacity(0.85)
-                    }
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 9).padding(.vertical, 5)
-                .background(Capsule().fill(.black.opacity(0.45)))
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .padding(.leading, 14).padding(.top, 66 * ui)
-                .allowsHitTesting(false)
-            }
-        }
-        .overlay(alignment: .bottom) {
-            if isActive {
-                progressBar
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("视频进度")
-                    .accessibilityValue("\(Int(current.isFinite ? current : 0)) / \(Int(duration.isFinite ? duration : 0)) 秒")
-                    .accessibilityIdentifier("douyin.progress")
-                    .padding(chromeInsets)
-                    .padding(.bottom, max(bottomInset, 8))
-            }
-        }
-        .onAppear {
-            if player == nil { setup() }
-            if isActive { bindRemote() }
-            DDPlayback.shared.register(playbackID, stop: { pauseForBackground() }, start: { resumeAfterBackground() })
-        }
-        .onDisappear {
-            DDPlayback.shared.unregister(playbackID)
-            teardown()
-        }
-        // 切后台 / 来电 / 下拉控制中心立刻停声（否则退出 App 声音还在响）
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
-            pauseForBackground()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
-            pauseForBackground()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-            resumeAfterBackground()
-        }
-        .onChange(of: muted) { _, m in
-            guard isActive else { return }
-            player?.isMuted = m
-            vlc?.mediaPlayer.audio?.isMuted = m
-        }
-        // 设置里改播放速度 = 明确要这个速度：撤掉本条的长按锁定，当前视频立刻生效
-        .onChange(of: playbackRate) { _, newRate in
-            if !rateBoost { lockedBoost = false }
-            let target = rateBoost ? 2 : newRate
-            if let v = vlc { v.setRate(Float(target)) }
-            else if let p = player, isPlaying { p.rate = Float(target) }
-        }
-        .onChange(of: isActive) { _, active in
-            if !active { lockedBoost = false }   // 滑走就解锁：只锁「当前这条」
-            if active { bindRemote() }
-            if let v = vlc {
-                if active { v.mediaPlayer.audio?.isMuted = muted; v.mediaPlayer.play(); isPlaying = true }
-                else { v.mediaPlayer.pause(); isPlaying = false; onSavePosition(v.current) }
-                return
-            }
-            if !active && hdPlayer != nil { revertToHD() }   // 秒开中途滑走：留下高清那个，回来接着用
-            guard let p = player else { if active { setup() }; return }
-            if active, p.currentItem == nil || p.currentItem?.status == .failed { rebuild(); return }
-            if active, shouldFastStart(p) {
-                try? AVAudioSession.sharedInstance().setCategory(.playback)
-                try? AVAudioSession.sharedInstance().setActive(true)
-                startFast(hd: p)
-                return
-            }
-            if active {
-                try? AVAudioSession.sharedInstance().setCategory(.playback)
-                try? AVAudioSession.sharedInstance().setActive(true)
-                #if DEBUG
-                logSwipeStart(p)
-                #endif
-                p.isMuted = muted; p.play(); isPlaying = true
-                watchdog(p)
-            } else {
-                p.isMuted = true; p.pause(); isPlaying = false
-                onSavePosition(p.currentTime().seconds)
             }
         }
     }
@@ -448,7 +493,10 @@ struct PlayerPage: View {
             verticalFirst: true,
             onHorizontalSwipe: navigationSwipes ? { left in
                 if left { onSwipeLeft?() } else { onSwipeRight?() }
-            } : nil
+            } : nil,
+            onPinchBegan: { pinchStartScale = videoScale },
+            onPinchChanged: { scale in videoScale = min(3, max(0.45, pinchStartScale * scale)) },
+            onPinchEnded: { pinchStartScale = videoScale }
         )
     }
 

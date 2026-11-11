@@ -25,8 +25,8 @@ struct DYNativeForwardPanel: View {
     let onAction: (String) -> Void
     let onClose: () -> Void
 
-    @ScaledMetric(relativeTo: .body) private var itemWidth: CGFloat = 84
-    private let avatarSize: CGFloat = 60
+    @ScaledMetric(relativeTo: .body) private var itemWidth: CGFloat = 72
+    private let avatarSize: CGFloat = 54
     private let inset = WuWeiDesign.Spacing.lg
 
     var body: some View {
@@ -39,7 +39,7 @@ struct DYNativeForwardPanel: View {
                     .padding(.horizontal, inset)
             } else {
                 contactRow
-                if loading || !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if status.contains("已复制") || status.contains("失败") || status.contains("未发送") || status.contains("合成") || status.contains("保存") {
                     contactStatus
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, inset)
@@ -47,44 +47,35 @@ struct DYNativeForwardPanel: View {
                 }
             }
 
-            if !actions.isEmpty {
-                actionRow
-                    .padding(.top, inset * 2)
-            }
+            Divider().padding(.top, 14)
+            actionRow(actions.filter { ["private", "groups", "other"].contains($0.id) }, colored: true)
+                .padding(.vertical, 14)
+            Divider()
+            actionRow(actions.filter { !["private", "groups", "other"].contains($0.id) }, colored: false)
+                .padding(.vertical, 14)
+            Spacer(minLength: 0)
         }
-        .padding(.bottom, inset * 2)
         .foregroundStyle(.themeTextPrimary)
-        .background(
-            Color(uiColor: .secondarySystemBackground),
-            in: RoundedRectangle(cornerRadius: inset * 2, style: .continuous)
-        )
-        .themeShadow(.floatingPanel)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("douyin.forward.panel")
     }
 
     private var header: some View {
-        HStack(spacing: WuWeiDesign.Spacing.md) {
-            Text("分享给")
-                .font(.title3.weight(.semibold))
-                .accessibilityAddTraits(.isHeader)
-            Spacer(minLength: 0)
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.body.weight(.semibold))
-                    .frame(width: inset * 2, height: inset * 2)
-                    .background(Color(uiColor: .tertiarySystemFill), in: Circle())
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
+        ZStack {
+            Text("分享至").font(.headline).accessibilityAddTraits(.isHeader)
+            HStack {
+                Button(action: onClose) {
+                    Image(systemName: "xmark").font(.title3.weight(.medium))
+                        .frame(width: 44, height: 44)
+                        .glassEffect(.regular.interactive(), in: .circle)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("关闭分享")
+                .accessibilityIdentifier("douyin.forward.close")
+                Spacer()
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("关闭转发面板")
-            .accessibilityIdentifier("douyin.forward.close")
         }
-        .padding(.leading, inset)
-        .padding(.trailing, WuWeiDesign.Spacing.sm)
-        .padding(.top, WuWeiDesign.Spacing.sm)
-        .padding(.bottom, inset)
+        .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 16)
     }
 
     private var contactRow: some View {
@@ -109,8 +100,9 @@ struct DYNativeForwardPanel: View {
                             .accessibilityHidden(true)
 
                             Text(contact.name)
-                                .font(.body)
-                                .lineLimit(1)
+                                .font(.caption)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.center)
                                 .truncationMode(.tail)
                                 .frame(maxWidth: .infinity)
                         }
@@ -147,19 +139,20 @@ struct DYNativeForwardPanel: View {
         return loading ? "正在加载分享联系人…" : "暂无可分享的联系人"
     }
 
-    private var actionRow: some View {
+    private func actionRow(_ row: [DYForwardPanelAction], colored: Bool) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(alignment: .top, spacing: WuWeiDesign.Spacing.sm) {
-                ForEach(actions) { action in
+                ForEach(row) { action in
                     Button { onAction(action.id) } label: {
                         VStack(spacing: WuWeiDesign.Spacing.md) {
                             Image(systemName: action.symbol)
                                 .font(.title2.weight(.semibold))
                                 .frame(width: avatarSize, height: avatarSize)
-                                .background(Color(uiColor: .systemBackground), in: Circle())
+                                .foregroundStyle(.white)
+                                .background(colored ? (action.id == "private" ? Color(red: 1, green: 0.16, blue: 0.34) : Color.blue) : Color.black.opacity(0.3), in: Circle())
                                 .accessibilityHidden(true)
                             Text(action.title)
-                                .font(.body)
+                                .font(.caption)
                                 .multilineTextAlignment(.center)
                                 .fixedSize(horizontal: false, vertical: true)
                         }

@@ -61,7 +61,7 @@ struct DYAweme: Identifiable, Codable, Equatable, Sendable {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
-    struct Author: Codable, Equatable { let name: String; let avatar: String?; let secUid: String?; var uid: String? = nil; var follow: Int? = nil }
+    struct Author: Codable, Hashable { let name: String; let avatar: String?; let secUid: String?; var uid: String? = nil; var follow: Int? = nil }
     struct Stats: Codable, Equatable { let digg: Int; let comment: Int; let collect: Int; let share: Int; var play: Int? = nil }
 
     /// 视频画面高宽比，不是界面方向。界面布局看容器尺寸 / size class。
@@ -1173,6 +1173,8 @@ extension EnvironmentValues {
     @Entry var duoSystemBars = false
     @Entry var duoInlineVideoNavigation = false
     @Entry var duoContentInsets = EdgeInsets()
+    @Entry var duoVisibleVideo: Binding<DYAweme?> = .constant(nil)
+    @Entry var duoDanmakuRequest: Binding<String?> = .constant(nil)
 }
 
 struct DouyinFeedScreen: View {
@@ -1204,7 +1206,8 @@ struct DouyinFeedScreen: View {
     @State private var lastFeedPull = Date.distantPast
     @AppStorage(DYVideoCache.countKey) private var cacheCount = DYVideoCache.defaultCount
     @State private var mainTab: DYMainTab = .home
-    @State private var dockExpanded = false
+    @State private var visibleVideo: DYAweme?
+    @State private var danmakuRequest: String?
     private var showMine: Bool {
         get { mainTab == .mine }
         nonmutating set { mainTab = newValue ? .mine : .home }
@@ -1229,10 +1232,11 @@ struct DouyinFeedScreen: View {
     @State private var wideToken = UUID()
     @State private var topChrome = CGRect.zero
     @State private var supportsSidePanel = false
-    private var sidePanelOpen: Bool { supportsSidePanel && (authorTarget != nil || (showComments && tab == .recommend)) }
+    private var sidePanelOpen: Bool { supportsSidePanel && (authorTarget != nil || showComments) }
 
     private var currentIndex: Int? { currentID.flatMap { id in feed.items.firstIndex { $0.id == id } } }
     private var current: DYAweme? { currentIndex.map { feed.items[$0] } }
+    private var commentAweme: DYAweme? { tab == .follow ? visibleVideo : current }
 
     var body: some View {
         systemTabs
@@ -1420,41 +1424,6 @@ struct DouyinFeedScreen: View {
 
     private var systemTabs: some View {
         TabView(selection: $mainTab) {
-            Tab("主页", systemImage: "house", value: DYMainTab.home) {
-                NavigationStack {
-                    layoutRoot
-                        .modifier(DYDockToolbar(tab: .home))
-                        .coordinateSpace(.named("douduo.feed"))
-                        .environment(\.duoSystemBars, true)
-                        .environment(\.duoInlineVideoNavigation, sidePanelOpen)
-                        .toolbar {
-                            if !sidePanelOpen {
-                                ToolbarItem(placement: .principal) { topBar }
-                                    .axisBehavior(.horizontalOnly)
-                                ToolbarItem(placement: .topBarTrailing) {
-                                    Button("搜索", systemImage: "magnifyingglass") { showSearch = true }
-                                        .accessibilityIdentifier("douyin.search")
-                                }
-                                .axisBehavior(.horizontalOnly)
-                                .visibilityPriority(.high)
-                                .sharedBackgroundVisibility(.hidden)
-                            }
-                        }
-                        .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
-                        .scrollEdgeEffectHidden(true, for: .all)
-                        .toolbarVisibility(.hidden, for: .tabBar)
-                        .toolbarVerticalCompressionBehavior(.prefersToolbarItems)
-                }
-            }
-            Tab("私信", systemImage: "bubble.left.and.bubble.right", value: DYMainTab.messages) {
-                DYMessagesScreen(bridge: bridge, onWeb: { url in
-                    mainTab = .home
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { web = DYWebTarget(url: url) }
-                })
-                .toolbarVisibility(.hidden, for: .tabBar)
-                .toolbarVerticalCompressionBehavior(.prefersToolbarItems)
-            }
-            .badge(noticeUnread)
             Tab("我的", systemImage: "person.crop.circle", value: DYMainTab.mine) {
                 DYMineScreen(bridge: bridge,
                              onLogin: { mainTab = .home; web = DYWebTarget(url: DouyinWeb.home) },
@@ -1463,24 +1432,34 @@ struct DouyinFeedScreen: View {
                                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { authorTarget = item.author }
                              },
                              onMessages: { mainTab = .messages })
-                    .toolbarVisibility(.hidden, for: .tabBar)
-                    .toolbarVerticalCompressionBehavior(.prefersToolbarItems)
+                    .modifier(DYSystemTabBar())
+            }
+            Tab("私信", systemImage: "bubble.left.and.bubble.right", value: DYMainTab.messages) {
+                DYMessagesScreen(bridge: bridge, onWeb: { url in
+                    mainTab = .home
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { web = DYWebTarget(url: url) }
+                })
+                .modifier(DYSystemTabBar())
+            }
+            .badge(noticeUnread)
+            Tab("首页", systemImage: "house", value: DYMainTab.home) {
+                NavigationStack {
+                    layoutRoot
+                        .coordinateSpace(.named("douduo.feed"))
+                        .environment(\.duoSystemBars, true)
+                        .environment(\.duoInlineVideoNavigation, sidePanelOpen)
+                        .environment(\.duoVisibleVideo, $visibleVideo)
+                        .environment(\.duoDanmakuRequest, $danmakuRequest)
+                        .toolbarVisibility(.hidden, for: .navigationBar)
+                        .toolbarMinimizationBehavior(.never, for: .navigationBar)
+                        .scrollEdgeEffectHidden(true, for: .all)
+                        .modifier(DYSystemTabBar())
+                }
             }
         }
-        .toolbarVerticalCompressionBehavior(.prefersToolbarItems)
-        .toolbarVisibility(.hidden, for: .tabBar)
+        .modifier(DYSystemTabBar())
         .toolbarVisibility(.visible, for: .statusBar)
-        .environment(\.duoMainTab, $mainTab)
-        .environment(\.duoDockExpanded, $dockExpanded)
-        .overlay {
-            if dockExpanded {
-                Color.clear.contentShape(Rectangle())
-                    .onTapGesture { dockExpanded = false }
-                    .accessibilityHidden(true)
-            }
-        }
         .onChange(of: mainTab) { _, selected in
-            dockExpanded = false
             saveSession()
             if selected != .home { DDPlayback.shared.pauseAll(reason: .cover) }
         }
@@ -1491,7 +1470,8 @@ struct DouyinFeedScreen: View {
         GeometryReader { geo in
             let wide = Self.playAreaIsWide(geo)
             flatArrangement(geo)
-                .onAppear { feed.screenWide = wide }
+                .onAppear { feed.screenWide = wide; insets = geo.safeAreaInsets }
+                .onChange(of: geo.safeAreaInsets) { _, value in insets = value }
                 .onGeometryChange(for: Bool.self) { proxy in
                     proxy.size.width >= DYDuoMetrics.legacyWideMin || (DYDuoMetrics.foldIsActive(proxy) && proxy.size.width > proxy.size.height)
                 } action: { supportsSidePanel = $0 }
@@ -1530,67 +1510,42 @@ struct DouyinFeedScreen: View {
     /// 一套布局通吃所有状态，且**不换容器**（换容器会重建播放器 → 黑屏 / 重播）：
     /// - 平放/外屏：视频铺满；够宽时评论从右侧滑出（视频缩窄），窄屏走底部 sheet
     /// - 半折叠：视频自动缩到一多半，另一半常驻评论（宽>高→左右分；高>宽→上下分）
-    /// 右侧评论栏宽度（没有右侧栏 = 0）；布局和顶栏共用同一算法
-    private func sidePanelWidth(_ geo: GeometryProxy) -> CGFloat {
-        let fold = tab == .recommend && DYDuoMetrics.foldIsActive(geo)
-        let w = geo.size.width, h = geo.size.height
-        let bookFold = fold && w > h
-        let sideBySide = w >= DYDuoMetrics.legacyWideMin || bookFold
-        let showPanel = fold || (sideBySide && (authorTarget != nil || (showComments && tab == .recommend)))
-        return showPanel && sideBySide ? w * 0.5 : 0
-    }
-
     private func flatArrangement(_ geo: GeometryProxy) -> some View {
-        let fold = tab == .recommend && DYDuoMetrics.foldIsActive(geo)
-        let wide = geo.size.width >= DYDuoMetrics.legacyWideMin
+        let layout = DYCommentPaneMetrics(geo, isPresented: authorTarget != nil || showComments,
+                                          allowsResident: tab != .live)
         let w = geo.size.width, h = geo.size.height
-        let bookFold = fold && w > h          // 书本姿态：左右分
-        let tableFold = fold && w <= h        // 桌面姿态：上下分
-        let sideBySide = wide || bookFold
-        let showPanel = fold || (sideBySide && (authorTarget != nil || (showComments && tab == .recommend)))
-
-        let panelW = sidePanelWidth(geo)
-        let panelH = tableFold ? h * 0.45 : 0
-        let videoW = sideBySide && panelW > 0 ? w - panelW : w
-        let videoH = tableFold ? h - panelH : h
 
         return ZStack(alignment: .topLeading) {
             feedArea
-                .frame(width: videoW, height: videoH, alignment: .topLeading)
-            if showPanel {
+                .frame(width: layout.videoSize.width, height: layout.videoSize.height, alignment: .topLeading)
+            if layout.showsPane {
                 Group {
                     if let author = authorTarget {
                         DYAuthorScreen(bridge: bridge, author: author,
                                        onWeb: { web = DYWebTarget(url: $0) },
                                        onClose: { withAnimation(.snappy) { authorTarget = nil } })
                             .id(author.id)
-                    } else if let cur = current {
+                    } else if let cur = commentAweme {
                         DYCommentPanel(bridge: bridge, aweme: cur,
-                                       onClose: fold ? nil : { withAnimation(.snappy) { showComments = false } },
-                                       fillsPane: true)
+                                       onClose: layout.resident ? nil : { withAnimation(.snappy) { showComments = false } },
+                                       fillsPane: true, trailingInset: layout.trailingInset)
                             .id(cur.id)
                     }
                 }
-                .frame(width: sideBySide ? panelW : w,
-                       height: tableFold ? panelH : h + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom)
+                .frame(width: layout.paneSize.width, height: layout.paneSize.height)
                 .clipped()
-                .overlay(alignment: .leading) { if sideBySide { Divider() } }
-                .offset(x: sideBySide ? videoW : 0,
-                        y: tableFold ? videoH : -geo.safeAreaInsets.top)
+                .overlay(alignment: .leading) { if layout.sideBySide { Divider() } }
+                .offset(x: layout.paneOrigin.x, y: layout.paneOrigin.y)
             }
         }
         .frame(width: w, height: h, alignment: .topLeading)
         .background(theme.media.strongScrim.color(for: scheme).ignoresSafeArea())
-        .animation(.snappy, value: fold)
+        .animation(.snappy, value: layout.resident)
         .animation(.snappy, value: showComments)
         .animation(.snappy, value: authorTarget?.id)
-        .sheet(isPresented: Binding(get: { showComments && !sideBySide && !fold }, set: { if !supportsSidePanel && !fold { showComments = $0 } })) {
-            if let cur = current {
-                DYCommentPanel(bridge: bridge, aweme: cur, onClose: { showComments = false }, drawsGlass: false)
-                    .toolbarVerticalBehavior(.disabled)
-                    // 竖屏锁死半屏：不给 .large，上滑不能把评论区撑满整屏
-                    .presentationDetents([.fraction(0.62)])
-                    .presentationDragIndicator(.visible)
+        .sheet(isPresented: Binding(get: { showComments && !layout.sideBySide && !layout.resident }, set: { if !supportsSidePanel && !layout.resident { showComments = $0 } })) {
+            if let cur = commentAweme {
+                DYCommentSheet(bridge: bridge, aweme: cur, onClose: { showComments = false })
             }
         }
     }
@@ -1641,6 +1596,8 @@ struct DouyinFeedScreen: View {
     /// 要换一批推荐走「更多 → 刷新推荐」。
     private func selectTab(_ target: DYTab) {
         guard tab != target else { return }
+        showComments = false
+        authorTarget = nil
         tab = target
     }
 
@@ -1719,7 +1676,13 @@ struct DouyinFeedScreen: View {
                              onAuthor: { a in authorTarget = a.author },
                              onLogin: { web = DYWebTarget(url: DouyinWeb.home) },
                              onToast: { showToast($0) },
-                             onLive: { r in live.open(r); selectTab(.live) })
+                             onComments: { item in
+                                 visibleVideo = item
+                                 authorTarget = nil
+                                 showComments = true
+                             },
+                             onLive: { r in live.open(r); selectTab(.live) },
+                             onShowRecommendations: { selectTab(.recommend) })
             } else {
                 recommendArea
             }
@@ -1743,33 +1706,42 @@ struct DouyinFeedScreen: View {
             #endif
         }
         .overlay(alignment: .top) {
-            if sidePanelOpen {
-                HStack(spacing: 8) {
-                    Color.clear.frame(width: 44, height: 44)
-                    Spacer(minLength: 0)
-                    topBar
-                    Spacer(minLength: 0)
-                    Button("搜索", systemImage: "magnifyingglass") { showSearch = true }
-                        .labelStyle(.iconOnly).font(.title2)
-                        .frame(width: 44, height: 44)
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("douyin.search")
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 8).padding(.top, 8)
-            }
-        }
-        // 顶栏要压在系统状态栏那一行，所以整块忽略顶部安全区；
-        // 外屏左右有侧边控制区，安全区会把顶栏整行往左挤，所以水平方向也忽略（视频本来就铺满）
-        .ignoresSafeArea(edges: [.top, .horizontal])
-        .background {
-            GeometryReader { geo in
-                Color.clear
-                    .onAppear { insets = geo.safeAreaInsets
+            // This is a sibling of the pager, never a child of a video page.
+            HStack(spacing: 8) {
+                if let item = tab == .recommend ? current : visibleVideo {
+                    DYVideoMoreMenu(item: item, bridge: bridge,
+                                    onToast: showToast,
+                                    onDislike: tab == .recommend ? { dislike(item.id) } : nil,
+                                    onSendDanmaku: { danmakuRequest = item.id },
+                                    extras: AnyView(moreExtrasMenu(item)))
+                } else {
+                    Menu {
+                        Button("官网 / 登录", systemImage: "safari") { web = DYWebTarget(url: DouyinWeb.home) }
+                    } label: {
+                        Image(systemName: "ellipsis").font(.title2.weight(.semibold)).frame(width: 44, height: 44)
                     }
-                    .onChange(of: geo.safeAreaInsets) { _, v in insets = v }
+                    .accessibilityIdentifier("douyin.more")
+                }
+                Spacer(minLength: 0)
+                topBar
+                Spacer(minLength: 0)
+                Button { showSearch = true } label: {
+                    Image(systemName: "magnifyingglass").font(.title2).frame(width: 44, height: 44)
+                }
+                .accessibilityLabel("搜索")
+                .accessibilityIdentifier("douyin.search")
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .padding(.leading, 8 + (sidePanelOpen ? 0 : insets.leading))
+            .padding(.trailing, 8 + (sidePanelOpen ? 0 : insets.trailing))
+            .padding(.top, max(insets.top, 8))
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("douyin.feed.header")
         }
+        // The video and bottom chrome reach the physical screen; add the actual
+        // home-indicator inset once, inside each page, rather than twice.
+        .ignoresSafeArea(.container)
         .onChange(of: tab) { _, t in
             if t == .recommend { focusCurrent() } else { preloader.clear() }
             if t != .live { live.stop() }
@@ -1777,10 +1749,10 @@ struct DouyinFeedScreen: View {
         .fullScreenCover(isPresented: $showSearch) {
             DYSearchScreen(bridge: bridge, onAuthor: { a in authorTarget = a.author })
         }
-        .sheet(item: Binding(get: { supportsSidePanel ? nil : authorTarget }, set: { if !supportsSidePanel { authorTarget = $0 } })) { a in
+        .navigationDestination(item: Binding(get: { supportsSidePanel ? nil : authorTarget }, set: { if !supportsSidePanel { authorTarget = $0 } })) { a in
             DYAuthorScreen(bridge: bridge, author: a, onWeb: { u in web = DYWebTarget(url: u) })
-                .presentationDetents([.medium, .large])
-                .presentationBackground(.black)
+                .navigationBarBackButtonHidden()
+                .toolbarVisibility(.hidden, for: .navigationBar)
         }
 
     }
@@ -2112,9 +2084,10 @@ struct DYVideoPage: View {
     @Environment(\.duoSystemBars) private var systemBars
     @Environment(\.duoInlineVideoNavigation) private var inlineNavigation
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.duoVisibleVideo) private var visibleVideo
+    @Environment(\.duoDanmakuRequest) private var danmakuRequest
     @Environment(\.horizontalSizeClass) private var hSize
     private var railWidth: CGFloat { hSize == .compact ? 50 : 54 }
-    private var actionColumnWidth: CGFloat { 54 }
     private var chromeSidePadding: CGFloat { 12 }
     // Full-bleed ancestors may report zero safe-area insets. Read the app's
     // foreground key window as a fallback, never a guessed device/rail width.
@@ -2126,14 +2099,21 @@ struct DYVideoPage: View {
             .first(where: \.isKeyWindow)?.safeAreaInsets.right ?? 0
         return max(insets.trailing, windowInset)
     }
+    private var actionRailTrailingPadding: CGFloat {
+        guard !inlineNavigation else { return chromeSidePadding }
+        // Follow the runtime system column, including the existing optical inset
+        // used by Duo chrome. The column midpoint includes the outer side margin.
+        return max(chromeSidePadding, systemColumnInset / 2 - railWidth / 2
+                   + theme.media.expandedRailOpticalInset)
+    }
     private var contentInsets: EdgeInsets {
-        guard systemBars && !inlineNavigation else { return EdgeInsets() }
+        guard systemBars else { return EdgeInsets() }
         let left = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .filter { $0.activationState == .foregroundActive }
             .flatMap(\.windows).first(where: \.isKeyWindow)?.safeAreaInsets.left ?? 0
         return EdgeInsets(top: 0, leading: max(insets.leading, left),
-                          bottom: 0, trailing: systemColumnInset)
+                          bottom: 0, trailing: max(inlineNavigation ? 0 : systemColumnInset, railWidth + chromeSidePadding))
     }
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var scheme
@@ -2161,13 +2141,14 @@ struct DYVideoPage: View {
     var onEnded: (() -> Void)? = nil
     var onBack: (() -> Void)? = nil
     var onShowFollowing: (() -> Void)? = nil
+    var onNavigateLeft: (() -> Void)? = nil
     @State private var authorImage: UIImage?
     @Environment(\.ddScale) private var ui
     @AppStorage("douyin_autoplay_v1") private var autoNext = false
     @State private var heart = false
     @State private var danmaku: [DYDanmaku] = []
     @State private var danmakuLoaded = false
-    @State private var saving = false
+    @State private var showShare = false
     @State private var showDanmakuInput = false
     @State private var danmakuDraft = ""
     @State private var danmakuSending = false
@@ -2181,7 +2162,7 @@ struct DYVideoPage: View {
          preloader: DYPreloader, bridge: DouyinBridge? = nil, onToast: ((String) -> Void)? = nil,
          onDislike: (() -> Void)? = nil, moreExtras: AnyView = AnyView(EmptyView()),
          onEnded: (() -> Void)? = nil, onBack: (() -> Void)? = nil,
-         onShowFollowing: (() -> Void)? = nil) {
+         onShowFollowing: (() -> Void)? = nil, onNavigateLeft: (() -> Void)? = nil) {
         self.item = item; self.isCurrent = isCurrent; self.insets = insets; self.resume = resume
         self.liked = liked; self.collected = collected
         self.onLike = onLike; self.onCollect = onCollect; self.onDoubleTap = onDoubleTap
@@ -2192,6 +2173,7 @@ struct DYVideoPage: View {
         self.onEnded = onEnded
         self.onBack = onBack
         self.onShowFollowing = onShowFollowing
+        self.onNavigateLeft = onNavigateLeft
     }
 
     var body: some View {
@@ -2220,7 +2202,7 @@ struct DYVideoPage: View {
                                     videoAspect: item.height > 0 ? item.width / item.height : 0,
                                     headEndSeconds: nil,
                                     continuationURL: nil,
-                                    onSwipeLeft: onAuthor, onSwipeRight: onShowFollowing)
+                                    onSwipeLeft: onNavigateLeft ?? onAuthor, onSwipeRight: onShowFollowing)
                     .environment(\.duoContentInsets, contentInsets)
             } else {
                 TabView {
@@ -2241,56 +2223,37 @@ struct DYVideoPage: View {
                     .allowsHitTesting(false)
             }
 
-            // 左下信息贴近进度条；右侧按钮维持原高度，不跟随标题下移。
-            HStack(alignment: .bottom, spacing: 12) {
-                info(fg)
-                Spacer(minLength: 0)
-                if !systemBars {
-                actions(fg)
-                    .offset(x: DYDuoMetrics.actionRailHorizontalOffset(
-                        isRegular: hSize == .regular, trailingInset: systemColumnInset,
-                        columnWidth: actionColumnWidth, outerPadding: chromeSidePadding,
-                        opticalLeadingInset: theme.media.expandedRailOpticalInset))
-                    .modifier(DYRailReservedNudge())
-                    .offset(x: hSize == .compact ? -9 : 0)
-                    .padding(.bottom, item.images.isEmpty ? 56 : 0)
-                }
-            }
-            .padding(.horizontal, chromeSidePadding)
-            .padding(contentInsets)
-            .padding(.bottom, max(insets.bottom, 8) + (item.images.isEmpty ? 16 * ui : 24))
+            info(fg)
+                .padding(.horizontal, chromeSidePadding)
+                .padding(contentInsets)
+                .padding(.bottom, max(insets.bottom - 24, 0) + (item.images.isEmpty ? 16 * ui : 16))
         }
-        .overlay(alignment: .topLeading) {
-            if inlineNavigation {
-                moreMenu(fg).buttonStyle(.plain)
-                    .frame(width: 44, height: 44).padding(8)
-            }
+        .overlay(alignment: .trailing) {
+            actions(fg)
+                .frame(width: railWidth)
+                .padding(.vertical, 7)
+                .glassEffect(.regular, in: .capsule)
+                .modifier(DYRailReservedNudge())
+                .padding(.trailing, actionRailTrailingPadding)
         }
         .overlay(alignment: .bottom) {
-            if showDanmakuInput { danmakuBar.padding(.bottom, max(insets.bottom, 12) + 6) }
+            if showDanmakuInput { danmakuBar.padding(.bottom, max(insets.bottom, 0) + 4) }
         }
-        .toolbar {
-            if systemBars && isCurrent {
-                ToolbarItemGroup(placement: .primaryAction) {
-                    authorButton
-                    countedAction("点赞", symbol: liked ? "heart.fill" : "heart", count: item.stats.digg, action: onLike)
-                        .tint(liked ? theme.status.danger.color(for: scheme) : nil)
-                        .accessibilityIdentifier("douyin.like")
-                    countedAction("评论", symbol: "ellipsis.bubble", count: item.stats.comment, action: onComments)
-                        .accessibilityIdentifier("douyin.comments")
-                    countedAction("收藏", symbol: collected ? "star.fill" : "star", count: item.stats.collect, action: onCollect)
-                        .tint(collected ? theme.status.warning.color(for: scheme) : nil)
-                        .accessibilityIdentifier("douyin.collect")
-                }
-                .axisBehavior(.verticalPreferred)
-                .visibilityPriority(.high)
-                if !inlineNavigation {
-                    ToolbarItem(placement: .topBarLeading) { moreMenu(fg) }
-                        .axisBehavior(.horizontalOnly)
-                        .visibilityPriority(.high)
-                        .sharedBackgroundVisibility(.hidden)
-                }
-            }
+        .sensoryFeedback(.impact(weight: .light), trigger: liked) { old, new in !old && new }
+        .sheet(isPresented: $showShare) {
+            DYForwardScreen(item: item)
+                .toolbarVerticalBehavior(.disabled)
+                .presentationDetents([.height(430), .large])
+                .presentationDragIndicator(.hidden)
+                .presentationCornerRadius(DDTheme.sheetCornerRadius)
+        }
+        .onAppear { if isCurrent { visibleVideo.wrappedValue = item } }
+        .onChange(of: isCurrent) { _, active in if active { visibleVideo.wrappedValue = item } }
+        .onChange(of: danmakuRequest.wrappedValue) { _, requested in
+            guard requested == item.id else { return }
+            showDanmakuInput = true
+            danmakuRequest.wrappedValue = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { danmakuFocused = true }
         }
         .task(id: item.author.avatar) {
             guard let url = item.author.avatar.flatMap(URL.init(string:)) else { authorImage = nil; return }
@@ -2310,41 +2273,6 @@ struct DYVideoPage: View {
             } catch {
                 DYLiveModel.log("DDDM id=\(item.id) error=\(error)")
             }
-        }
-    }
-
-    private func countedAction(_ title: String, symbol: String, count: Int,
-                               action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label {
-                Text(title)
-            } icon: {
-                Image(uiImage: countedSymbol(symbol, count: DYFormat.count(count)))
-                    .renderingMode(.template)
-            }
-        }
-        .accessibilityLabel("\(title)，\(DYFormat.count(count))")
-    }
-
-    // Vertical system toolbars extract the Label's image and hide its title.
-    // Include the count in that image so the standard toolbar still controls
-    // placement, hit targets and overflow. VoiceOver receives the full text above.
-    private func countedSymbol(_ symbol: String, count: String) -> UIImage {
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = displayScale
-        return UIGraphicsImageRenderer(size: CGSize(width: 42, height: 50), format: format).image { _ in
-            let icon = UIImage(systemName: symbol,
-                               withConfiguration: UIImage.SymbolConfiguration(pointSize: 30, weight: .regular))!
-                .withTintColor(.white, renderingMode: .alwaysOriginal)
-            let size = icon.size
-            icon.draw(in: CGRect(x: (42 - size.width) / 2, y: 0, width: size.width, height: size.height))
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.alignment = .center
-            (count as NSString).draw(in: CGRect(x: 0, y: 36, width: 42, height: 14), withAttributes: [
-                .font: UIFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
-                .foregroundColor: UIColor.white,
-                .paragraphStyle: paragraph
-            ])
         }
     }
 
@@ -2397,21 +2325,6 @@ struct DYVideoPage: View {
         }
     }
 
-    private func save() {
-        guard !saving else { return }
-        saving = true
-        onToast?("正在保存…")
-        Task {
-            do {
-                try await DYSaver.save(item)
-                onToast?(item.images.isEmpty ? "视频已保存到相册" : "图集已保存到相册")
-            } catch {
-                onToast?("保存失败：\(error.localizedDescription)")
-            }
-            saving = false
-        }
-    }
-
     /// 作者、文案、元数据、音乐；音乐贴近进度条，作者头像归入互动栏。
     private func info(_ fg: Color) -> some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -2445,16 +2358,14 @@ struct DYVideoPage: View {
 
     private var authorButton: some View {
         Button(action: onAuthor) {
-            Label {
-                Text("作者，" + item.author.name)
-            } icon: {
-                if let authorImage {
-                    Image(uiImage: circularAvatar(authorImage)).renderingMode(.original)
-                } else {
-                    Image(systemName: "person.crop.circle").font(.title)
-                }
+            Group {
+                if let authorImage { Image(uiImage: circularAvatar(authorImage)).renderingMode(.original) }
+                else { Image(systemName: "person.crop.circle").font(.largeTitle) }
             }
+            .frame(width: railWidth, height: 44)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .accessibilityLabel("作者，" + item.author.name)
         .accessibilityIdentifier("douyin.author.avatar")
     }
@@ -2473,97 +2384,56 @@ struct DYVideoPage: View {
         }.withRenderingMode(.alwaysOriginal)
     }
 
-    /// 小红书式右侧栏：一根竖向液态玻璃胶囊（赞 / 评论 / 收藏 / 搜索，数字在图标下），下方单独一颗「更多」圆按钮
+    /// Part of each paged video: it moves with that video, independent of the
+    /// fixed header and system tab bar. Counts remain real accessible text.
     private func actions(_ fg: Color) -> some View {
-        VStack(spacing: theme.media.actionGroupSpacing) {
+        VStack(spacing: 7) {
             if let onBack {
-                Button(action: onBack) {
-                    Image(systemName: "chevron.backward")
-                        .font(.title2.weight(.medium))
-                        .foregroundStyle(fg)
-                        .frame(width: 50, height: 50)
-                }
-                .buttonStyle(.plain)
-                .ddGlassCapsule()
-                .accessibilityLabel("返回上一层")
-                .accessibilityIdentifier("douyin.list.back")
+                Button("返回", systemImage: "chevron.backward", action: onBack)
+                    .labelStyle(.iconOnly).frame(width: 44, height: 44)
+                    .accessibilityIdentifier("douyin.list.back")
             }
-            VStack(spacing: theme.media.actionItemSpacing) {
-                authorButton
-                railItem(liked ? "heart.fill" : "heart", DYFormat.count(item.stats.digg + (liked ? 1 : 0)),
-                         tint: liked ? theme.status.danger.color(for: scheme) : fg, "douyin.like", onLike)
-                railItem("ellipsis.bubble", DYFormat.count(item.stats.comment), tint: fg, "douyin.comments", onComments)
-                railItem(collected ? "star.fill" : "star", DYFormat.count(item.stats.collect + (collected ? 1 : 0)),
-                         tint: collected ? theme.status.warning.color(for: scheme) : fg, "douyin.collect", onCollect)
-                railItem("magnifyingglass", "", tint: fg, "douyin.search", onSearch)
+            authorButton
+            railItem(liked ? "heart.fill" : "heart", DYFormat.count(item.stats.digg + (liked ? 1 : 0)),
+                     tint: liked ? theme.status.danger.color(for: scheme) : fg, "douyin.like", onLike)
+            railItem("ellipsis.bubble", DYFormat.count(item.stats.comment), tint: fg, "douyin.comments", onComments)
+            railItem(collected ? "star.fill" : "star", DYFormat.count(item.stats.collect + (collected ? 1 : 0)),
+                     tint: collected ? theme.status.warning.color(for: scheme) : fg, "douyin.collect", onCollect)
+            railItem("arrowshape.turn.up.right", DYFormat.count(item.stats.share), tint: fg, "douyin.share") { showShare = true }
+            if !systemBars {
+                DYVideoMoreMenu(item: item, bridge: bridge, onToast: onToast, onDislike: onDislike,
+                                onSendDanmaku: bridge == nil ? nil : {
+                                    showDanmakuInput = true
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { danmakuFocused = true }
+                                }, extras: moreExtras)
             }
-            .padding(.vertical, 8)
-            .frame(width: railWidth)
-            .ddGlassCapsule()
-            .frame(width: actionColumnWidth)
-            moreMenu(fg)
         }
-        .themeShadow(.mediaLabel)
+        .foregroundStyle(fg)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("douyin.video.actions")
     }
 
     private func railItem(_ icon: String, _ text: String, tint: Color, _ id: String, _ act: @escaping () -> Void) -> some View {
         Button(action: act) {
             VStack(spacing: 2) {
                 Image(systemName: icon)
-                    .font(.system(size: theme.typography.pointSize(.displayLarge), weight: .regular))
+                    .font(.system(size: 27, weight: .regular))
                     .foregroundStyle(tint)
-                    .frame(height: 34)
+                    .frame(height: 30)
                 if !text.isEmpty {
                     Text(text).font(.caption2.weight(.medium)).monospacedDigit()
                         .foregroundStyle(theme.media.onMediaSecondary.color(for: scheme))
                         .lineLimit(1).minimumScaleFactor(0.7)
                 }
             }
-            .frame(width: railWidth, height: text.isEmpty ? 44 : 50)
+            .frame(width: railWidth, height: text.isEmpty ? 44 : 46)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel((id == "douyin.like" ? "点赞" : id == "douyin.comments" ? "评论" : id == "douyin.collect" ? "收藏" : "分享") + "，" + text)
         .accessibilityIdentifier(id)
     }
 
-    /// 「更多」：转发 / 下载快捷入口 → 不感兴趣 → 弹幕 → 刷新推荐 / 设置。
-    @ViewBuilder
-    private func moreMenu(_ fg: Color) -> some View {
-        Menu {
-            ControlGroup {
-                DYForwardMenu(item: item, bridge: bridge, foreground: fg)
-                Button {
-                    save()
-                } label: {
-                    Label(saving ? "保存中…" : "下载", systemImage: "arrow.down.to.line")
-                }
-                .disabled(saving)
-                .accessibilityIdentifier("douyin.save")
-            }
-            if let onDislike {
-                Button("不感兴趣", systemImage: "hand.thumbsdown", role: .destructive) { onDislike() }
-                    .accessibilityIdentifier("douyin.dislike")
-            }
-            if item.images.isEmpty {
-                DYDanmakuOptions(onSend: bridge == nil ? nil : {
-                    showDanmakuInput = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { danmakuFocused = true }
-                })
-            }
-            moreExtras
-        } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: theme.typography.pointSize(.displayLarge), weight: .semibold))
-                .foregroundStyle(fg)
-                .frame(width: systemBars ? 28 : 50, height: systemBars ? 28 : 50)
-                .contentShape(Circle())
-                .glassEffect(systemBars ? .identity : .regular.interactive(), in: .circle)
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("douyin.more")
-        .modifier(DYForwardPresentation(item: item))
-    }
 
 }
 
@@ -2599,8 +2469,8 @@ struct DYCommentPanel: View {
     let onClose: (() -> Void)?
     /// 从消息点评论进来：首屏用 insert_ids 把这条评论顶到第一条并高亮
     let focus: DYCommentFocus?
-    let drawsGlass: Bool
     let fillsPane: Bool
+    let trailingInset: CGFloat
     @State private var items: [DYComment] = []
     @State private var cursor = 0
     @State private var hasMore = true
@@ -2632,10 +2502,10 @@ struct DYCommentPanel: View {
     @State private var relatedQuery: DYRelatedQuery?
     @FocusState private var inputFocused: Bool
 
-    init(bridge: DouyinBridge, aweme: DYAweme, onClose: (() -> Void)?, focus: DYCommentFocus? = nil, drawsGlass: Bool = true, fillsPane: Bool = false) {
+    init(bridge: DouyinBridge, aweme: DYAweme, onClose: (() -> Void)?, focus: DYCommentFocus? = nil, fillsPane: Bool = false, trailingInset: CGFloat = 0) {
         self.bridge = bridge; self.aweme = aweme; self.onClose = onClose
-        self.drawsGlass = drawsGlass
         self.fillsPane = fillsPane
+        self.trailingInset = trailingInset
         self.focus = focus?.awemeID == aweme.id ? focus : nil
     }
 
@@ -2643,7 +2513,8 @@ struct DYCommentPanel: View {
         VStack(spacing: 0) {
             ZStack {
                 Text(total > 0 ? "\(DYFormat.count(total)) 条评论" : "评论")
-                    .font(.subheadline.weight(.semibold))
+                    .font(.footnote.weight(.semibold))
+                    .accessibilityIdentifier("douyin.comments.title")
                     .frame(maxWidth: .infinity, alignment: fillsPane ? .center : .leading)
                     .padding(.horizontal, fillsPane ? 44 : 0)
                 if let onClose {
@@ -2661,8 +2532,30 @@ struct DYCommentPanel: View {
             }
             .frame(minHeight: 44)
             .foregroundStyle(.themeTextPrimary)
-            .padding(.horizontal, 16).padding(.vertical, fillsPane ? 4 : 12)
+            .padding(.horizontal, 12)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("douyin.comments.header")
 
+            if !relatedWords.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 12) {
+                        Text("相关搜索").font(.caption).foregroundStyle(.themeTextSecondary)
+                        ForEach(relatedWords, id: \.self) { word in
+                            Button { relatedQuery = DYRelatedQuery(word: word) } label: {
+                                Label(word, systemImage: "magnifyingglass")
+                                    .font(.footnote).lineLimit(1)
+                                    .foregroundStyle(theme.accent.color(for: scheme))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 6)
+                }
+                .scrollIndicators(.hidden)
+                .frame(maxWidth: .infinity)
+                .clipped()
+                .accessibilityIdentifier("douyin.comments.relatedSearch")
+            }
             Divider()
             ScrollViewReader { proxy in
             ScrollView {
@@ -2695,33 +2588,13 @@ struct DYCommentPanel: View {
                 withAnimation(.snappy) { proxy.scrollTo(h, anchor: .center) }
             }
             }
-            if !relatedWords.isEmpty {
-                Divider()
-                ScrollView(.horizontal) {
-                    HStack(spacing: 12) {
-                        Text("相关搜索").font(.caption).foregroundStyle(.themeTextSecondary)
-                        ForEach(relatedWords, id: \.self) { word in
-                            Button { relatedQuery = DYRelatedQuery(word: word) } label: {
-                                Label(word, systemImage: "magnifyingglass")
-                                    .font(.footnote).lineLimit(1)
-                                    .foregroundStyle(theme.accent.color(for: scheme))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.horizontal, 16).padding(.vertical, 10)
-                }
-                .scrollIndicators(.hidden)
-                .frame(maxWidth: .infinity)
-                .clipped()
-                .accessibilityIdentifier("douyin.comments.relatedSearch")
-            }
             Divider()
             inputBar
         }
+        .padding(.trailing, trailingInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .clipShape(.rect(cornerRadius: drawsGlass && !fillsPane ? 24 : 0))
-        .glassEffect(drawsGlass ? .regular : .identity, in: .rect(cornerRadius: fillsPane ? 0 : 24))
+        .background(fillsPane ? Color(uiColor: .secondarySystemBackground) : .clear)
+        .clipped()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("douyin.comments.panel")
         .task(id: aweme.id) { relatedWords = await bridge.relatedSearch(for: aweme) }
@@ -2807,7 +2680,7 @@ struct DYCommentPanel: View {
                 }
             }
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
+        .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 2)
         .task { await DYEmojiStore.shared.load(bridge: bridge) }
     }
 

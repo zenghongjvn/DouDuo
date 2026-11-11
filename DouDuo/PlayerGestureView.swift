@@ -25,11 +25,16 @@ struct PlayerGestureView: UIViewRepresentable {
     /// When provided, a horizontal gesture navigates once on release and never seeks.
     var onHorizontalSwipe: ((Bool) -> Void)? = nil // true = left
 
+    var onPinchBegan: () -> Void = {}
+    var onPinchChanged: (CGFloat) -> Void = { _ in }
+    var onPinchEnded: () -> Void = {}
+
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> UIView {
         let v = UIView()
         v.backgroundColor = .clear
+        v.accessibilityIdentifier = "douyin.video.gestures"
         v.isUserInteractionEnabled = true
         let c = context.coordinator
         c.view = v
@@ -52,6 +57,7 @@ struct PlayerGestureView: UIViewRepresentable {
 
         let pan = UIPanGestureRecognizer(target: c, action: #selector(Coordinator.handlePan(_:)))
         pan.delegate = c
+        pan.maximumNumberOfTouches = 1
         c.pan = pan
 
         // 屏幕左缘右滑退出（系统级边缘手势，只在最左 ~20pt 触发，不抢中间区域）
@@ -61,6 +67,10 @@ struct PlayerGestureView: UIViewRepresentable {
         c.edge = edge
         pan.require(toFail: edge)
 
+        let pinch = UIPinchGestureRecognizer(target: c, action: #selector(Coordinator.handlePinch(_:)))
+        pinch.delegate = c
+        c.pinch = pinch
+        v.addGestureRecognizer(pinch)
         v.addGestureRecognizer(single)
         v.addGestureRecognizer(double)
         v.addGestureRecognizer(long)
@@ -79,6 +89,7 @@ struct PlayerGestureView: UIViewRepresentable {
         weak var pan: UIPanGestureRecognizer?
         weak var edge: UIScreenEdgePanGestureRecognizer?
         weak var long: UILongPressGestureRecognizer?
+        weak var pinch: UIPinchGestureRecognizer?
         private var pressStartY: CGFloat = 0
         private var pressLocked = false
         private weak var frozenScroll: UIScrollView?
@@ -111,6 +122,32 @@ struct PlayerGestureView: UIViewRepresentable {
                 frozenScroll?.panGestureRecognizer.isEnabled = true; frozenScroll = nil
                 pressLocked = false
                 parent.onLongPress(false)
+            default: break
+            }
+        }
+
+        @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+            switch gesture.state {
+            case .began:
+                // A second finger cancels any single-finger boost/navigation.
+                long?.isEnabled = false
+                pan?.isEnabled = false
+                var ancestor = view?.superview
+                while let current = ancestor, !(current is UIScrollView) { ancestor = current.superview }
+                if let scroll = ancestor as? UIScrollView {
+                    scroll.panGestureRecognizer.isEnabled = false
+                    frozenScroll = scroll
+                }
+                parent.onPinchBegan()
+                parent.onPinchChanged(gesture.scale)
+            case .changed:
+                parent.onPinchChanged(gesture.scale)
+            case .ended, .cancelled, .failed:
+                parent.onPinchEnded()
+                long?.isEnabled = true
+                pan?.isEnabled = true
+                frozenScroll?.panGestureRecognizer.isEnabled = true
+                frozenScroll = nil
             default: break
             }
         }
@@ -152,6 +189,8 @@ struct PlayerGestureView: UIViewRepresentable {
         // 否则都判为快进，避免快进时带点下滑分量被误识别成切视频。
 
         func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+            if g is UIPinchGestureRecognizer { return true }
+            if let pinch, pinch.state == .began || pinch.state == .changed { return false }
             if g is UIScreenEdgePanGestureRecognizer { return parent.onHorizontalSwipe == nil }
             guard let pg = g as? UIPanGestureRecognizer, let v = view else { return true }
             // 长按（2 倍速）期间不触发快进
@@ -175,6 +214,7 @@ struct PlayerGestureView: UIViewRepresentable {
         // 手势互斥：Pan 已激活（横向快进）→ 独占，不允许 ScrollView 同时响应
         // Pan 被拒绝（竖向）→ 返回 true 让 ScrollView 接管分页
         func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            if g is UIPinchGestureRecognizer || other is UIPinchGestureRecognizer { return false }
             if let pg = pan, pg.state == .began || pg.state == .changed {
                 return false   // 横向导航/拖进度，独占
             }
