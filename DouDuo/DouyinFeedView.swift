@@ -1231,6 +1231,7 @@ struct DouyinFeedScreen: View {
     @State private var noticeUnread = 0
     @State private var wideToken = UUID()
     @State private var topChrome = CGRect.zero
+    @State private var dockExpanded = false
     @State private var supportsSidePanel = false
     private var sidePanelOpen: Bool { supportsSidePanel && (authorTarget != nil || showComments) }
 
@@ -1432,14 +1433,12 @@ struct DouyinFeedScreen: View {
                                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { authorTarget = item.author }
                              },
                              onMessages: { mainTab = .messages })
-                    .modifier(DYSystemTabBar())
             }
             Tab("私信", systemImage: "bubble.left.and.bubble.right", value: DYMainTab.messages) {
                 DYMessagesScreen(bridge: bridge, onWeb: { url in
                     mainTab = .home
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { web = DYWebTarget(url: url) }
                 })
-                .modifier(DYSystemTabBar())
             }
             .badge(noticeUnread)
             Tab("首页", systemImage: "house", value: DYMainTab.home) {
@@ -1454,19 +1453,15 @@ struct DouyinFeedScreen: View {
                         .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
                         .toolbarMinimizationBehavior(.never, for: .navigationBar)
                         .scrollEdgeEffectHidden(true, for: .all)
-                        .modifier(DYSystemTabBar(hidden: true))
-                        .toolbar {
-                            ToolbarItem(placement: .bottomBar) {
-                                DYHomeTabMenu(selection: $mainTab)
-                            }
-                            .axisBehavior(.verticalPreferred)
-                            .hidden(sidePanelOpen || authorTarget != nil)
-                        }
+                        .modifier(DYSystemTabBar(hidden: sidePanelOpen || authorTarget != nil))
                 }
             }
         }
+        .environment(\.duoDockSelection, $mainTab)
+        .environment(\.duoDockExpanded, $dockExpanded)
         .toolbarVisibility(.visible, for: .statusBar)
         .onChange(of: mainTab) { _, selected in
+            if selected == .home { dockExpanded = false }
             saveSession()
             if selected != .home { DDPlayback.shared.pauseAll(reason: .cover) }
         }
@@ -1519,7 +1514,7 @@ struct DouyinFeedScreen: View {
     /// - 半折叠：视频自动缩到一多半，另一半常驻评论（宽>高→左右分；高>宽→上下分）
     private func flatArrangement(_ geo: GeometryProxy) -> some View {
         let layout = DYCommentPaneMetrics(geo, isPresented: authorTarget != nil || showComments,
-                                          allowsResident: tab != .live, paneFraction: authorTarget == nil ? 1 / 3 : 0.5)
+                                          allowsResident: tab != .live, paneFraction: authorTarget == nil ? nil : 0.5)
         let w = geo.size.width, h = geo.size.height
 
         return ZStack(alignment: .topLeading) {
@@ -1548,9 +1543,6 @@ struct DouyinFeedScreen: View {
         }
         .frame(width: w, height: h, alignment: .topLeading)
         .background(theme.media.strongScrim.color(for: scheme).ignoresSafeArea())
-        .overlayPreferenceValue(DYActiveVideoRailKey.self) { rail in
-            if authorTarget == nil { DYNativeVideoRail(rail: rail) }
-        }
         .animation(.snappy, value: layout.resident)
         .animation(.snappy, value: showComments)
         .animation(.snappy, value: authorTarget?.id)
@@ -2240,14 +2232,12 @@ struct DYVideoPage: View {
                 .padding(.bottom, max(insets.bottom - 24, 0) + (item.images.isEmpty ? 16 * ui : 16))
         }
         .overlay(alignment: .trailing) {
-            if !systemBars && !inlineNavigation {
+            if !inlineNavigation {
                 actionCapsule(fg)
                     .modifier(DYRailReservedNudge())
                     .padding(.trailing, actionRailTrailingPadding)
             }
         }
-        .preference(key: DYActiveVideoRailKey.self,
-                    value: isCurrent ? AnyView(actionCapsule(fg)) : nil)
         .overlay(alignment: .bottom) {
             if showDanmakuInput { danmakuBar.padding(.bottom, max(insets.bottom, 0) + 4) }
         }
@@ -2530,12 +2520,11 @@ struct DYCommentPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ZStack {
+            HStack {
                 Text(total > 0 ? "\(DYFormat.count(total)) 条评论" : "评论")
-                    .font(.footnote.weight(.semibold))
+                    .font(.subheadline.weight(.semibold))
                     .accessibilityIdentifier("douyin.comments.title")
-                    .frame(maxWidth: .infinity, alignment: fillsPane ? .center : .leading)
-                    .padding(.horizontal, fillsPane ? 44 : 0)
+                Spacer(minLength: 8)
                 if let onClose {
                     HStack {
                         Spacer()
@@ -2551,7 +2540,8 @@ struct DYCommentPanel: View {
             }
             .frame(minHeight: 44)
             .foregroundStyle(.themeTextPrimary)
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 16)
+            .padding(.trailing, trailingInset)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("douyin.comments.header")
 
@@ -2573,6 +2563,7 @@ struct DYCommentPanel: View {
                 .scrollIndicators(.hidden)
                 .frame(maxWidth: .infinity)
                 .clipped()
+                .padding(.trailing, trailingInset)
                 .accessibilityIdentifier("douyin.comments.relatedSearch")
             }
             Divider()
@@ -2607,10 +2598,14 @@ struct DYCommentPanel: View {
                 withAnimation(.snappy) { proxy.scrollTo(h, anchor: .center) }
             }
             }
-            Divider()
-            inputBar
         }
-        .padding(.trailing, trailingInset)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                Divider()
+                inputBar
+            }
+            .background(fillsPane ? Color(uiColor: .secondarySystemBackground) : .clear)
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(fillsPane ? Color(uiColor: .secondarySystemBackground) : .clear)
         .clipped()
@@ -2803,6 +2798,7 @@ struct DYCommentPanel: View {
 
     private func row(_ c: DYComment, parent: String?) -> some View {
         rowBody(c)
+            .padding(.trailing, fillsPane && c.id == items.first?.id ? trailingInset : 0)
             .contentShape(Rectangle())
             .onTapGesture { replyTo = c; replyParent = parent ?? c.parent; inputFocused = true }
             .padding(highlight == c.id ? 6 : 0)

@@ -390,6 +390,7 @@ final class DouDuoUITests: XCTestCase {
         app.launchArguments += ["-douyin_muted_v1", "YES"]
         addTeardownBlock { app.terminate() }
         app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7705789488781932361"
+        app.launchEnvironment["DOUDUO_AUTHOR_WORK_FIXTURE"] = "1"
         app.launch()
         guard app.windows.firstMatch.frame.width >= 700 else {
             throw XCTSkip("只验收已经展开的 Duo 内屏；不把外屏或 iPad 当作替代")
@@ -406,13 +407,19 @@ final class DouDuoUITests: XCTestCase {
         let info = app.otherElements["douyin.video.info"].firstMatch
         let panel = app.otherElements["douyin.comments.panel"].firstMatch
         XCTAssertLessThanOrEqual(info.frame.maxX, panel.frame.minX, "视频留在左侧，评论在右侧")
-        XCTAssertEqual(panel.frame.width, app.frame.width / 3, accuracy: 3)
+        XCTAssertGreaterThan(panel.frame.width, app.windows.firstMatch.frame.width * 0.40)
+        XCTAssertLessThan(panel.frame.width, app.windows.firstMatch.frame.width * 0.52)
         XCTAssertFalse(app.buttons["house"].firstMatch.isHittable)
         XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "douyin.dock.home").firstMatch.isHittable)
-        XCTAssertGreaterThan(comment.frame.minX, panel.frame.minX)
-        XCTAssertEqual(panel.frame.maxX, app.frame.maxX, accuracy: 1, "评论背景延伸到状态栏所在的屏幕右缘")
+        for id in ["douyin.author.avatar", "douyin.like", "douyin.comments", "douyin.collect", "douyin.share"] {
+            XCTAssertFalse(app.buttons[id].firstMatch.exists, "内屏评论打开时完全移除视频互动栏：" + id)
+        }
+        let related = app.scrollViews["douyin.comments.relatedSearch"].firstMatch
+        XCTAssertTrue(related.waitForExistence(timeout: 15))
+        XCTAssertLessThan(related.frame.maxY, panel.frame.minY + 100)
+        XCTAssertEqual(panel.frame.maxX, app.windows.firstMatch.frame.maxX, accuracy: 1, "评论背景延伸到状态栏所在的屏幕右缘")
         XCTAssertLessThanOrEqual(panel.frame.minY, 4)
-        XCTAssertGreaterThan(panel.frame.height, app.frame.height * 0.9)
+        XCTAssertGreaterThan(panel.frame.height, app.windows.firstMatch.frame.height * 0.9)
         XCTAssertTrue(app.buttons["douyin.search"].firstMatch.isHittable)
         XCTAssertTrue(app.buttons["douyin.more"].firstMatch.isHittable)
         attach(app, "duo-inner-solid-comments-to-screen-edge")
@@ -422,9 +429,27 @@ final class DouDuoUITests: XCTestCase {
         app.buttons["douyin.author.avatar"].firstMatch.tap()
         let author = app.otherElements["douyin.author.panel"].firstMatch
         XCTAssertTrue(author.waitForExistence(timeout: 10))
-        XCTAssertGreaterThan(author.frame.minX, app.frame.width * 0.35)
+        XCTAssertGreaterThan(author.frame.minX, app.windows.firstMatch.frame.width * 0.35)
         XCTAssertLessThanOrEqual(info.frame.maxX, author.frame.minX)
+        XCTAssertFalse(app.buttons["douyin.dock.home"].firstMatch.isHittable)
         attach(app, "duo-inner-author-split")
+        let work = app.descendants(matching: .any).matching(identifier: "douyin.author.works").firstMatch.buttons.firstMatch
+        XCTAssertTrue(work.waitForExistence(timeout: 35), app.debugDescription)
+        work.tap()
+        let workBack = app.buttons["douyin.list.back"].firstMatch
+        XCTAssertTrue(workBack.waitForExistence(timeout: 15))
+        for id in ["douyin.list.back", "douyin.author.avatar", "douyin.like", "douyin.comments", "douyin.collect", "douyin.share"] {
+            XCTAssertTrue(app.buttons[id].firstMatch.isHittable, "作者作品页保留按钮：" + id)
+        }
+        attach(app, "duo-inner-author-work-controls")
+        app.buttons["douyin.comments"].firstMatch.tap()
+        XCTAssertTrue(close.waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["douyin.like"].firstMatch.exists)
+        attach(app, "duo-inner-author-work-comments")
+        close.tap()
+        XCTAssertTrue(workBack.waitForExistence(timeout: 10))
+        workBack.tap()
+        XCTAssertTrue(app.buttons["douyin.author.back"].firstMatch.waitForExistence(timeout: 10))
         app.buttons["douyin.author.back"].firstMatch.tap()
         XCTAssertEqual(current.label, id)
     }
@@ -532,35 +557,40 @@ final class DouDuoUITests: XCTestCase {
         for id in actionIDs.dropFirst() {
             XCTAssertNotNil(visibleButton(id).label.rangeOfCharacter(from: .decimalDigits))
         }
-        let tabIDs = ["person.crop.circle", "bubble.left.and.bubble.right", "house"]
         let homeMenu = app.buttons["douyin.dock.home"].firstMatch
-        XCTAssertTrue(homeMenu.isHittable)
-        XCTAssertFalse(app.buttons["house"].firstMatch.isHittable, "首页默认只显示系统菜单按钮")
+        attach(app, "build92-home-before-dock-check")
+        XCTAssertTrue(homeMenu.isHittable, app.debugDescription)
+        XCTAssertFalse(app.buttons["douyin.dock.mine"].firstMatch.exists, "首页默认收起")
+        XCTAssertLessThanOrEqual(homeMenu.frame.width, 56)
         for action in actions {
-            XCTAssertEqual(action.frame.midX, homeMenu.frame.midX, accuracy: 2,
-                           "互动胶囊与系统菜单同属右侧状态栏")
+            XCTAssertLessThanOrEqual(action.frame.width, 54, "保留小尺寸互动栏")
+            XCTAssertEqual(action.frame.midX, homeMenu.frame.midX, accuracy: 8)
         }
         let info = app.otherElements["douyin.video.info"].firstMatch
         let progress = app.otherElements["douyin.progress"].firstMatch
         XCTAssertFalse(info.frame.intersects(homeMenu.frame))
         XCTAssertFalse(progress.frame.intersects(homeMenu.frame))
-        XCTAssertLessThan(app.frame.maxY - progress.frame.maxY, 20)
-        attach(app, "build91-home-collapsed-system-menu")
+        XCTAssertLessThan(app.windows.firstMatch.frame.maxY - progress.frame.maxY, 20)
+        attach(app, "build92-dock-collapsed")
         let originalID = current.label
         homeMenu.tap()
         let mineChoice = app.buttons["douyin.dock.mine"].firstMatch
         let messageChoice = app.buttons["douyin.dock.messages"].firstMatch
-        let homeChoice = app.buttons["douyin.dock.current"].firstMatch
+        let homeChoice = app.buttons["douyin.dock.home"].firstMatch
         XCTAssertTrue(mineChoice.waitForExistence(timeout: 5))
         XCTAssertLessThan(mineChoice.frame.minY, messageChoice.frame.minY)
         XCTAssertLessThan(messageChoice.frame.minY, homeChoice.frame.minY)
-        attach(app, "build91-home-system-menu-expanded")
+        attach(app, "build92-dock-expanded")
+        let expandedHomeFrame = homeChoice.frame
         mineChoice.tap()
-        let tabs = ["person.crop.circle", "bubble.left.and.bubble.right", "house"].map { app.buttons[$0].firstMatch }
+        let tabs = ["douyin.dock.mine", "douyin.dock.messages", "douyin.dock.home"].map { app.buttons[$0].firstMatch }
         XCTAssertTrue(tabs[0].waitForExistence(timeout: 5))
         XCTAssertLessThan(tabs[0].frame.midY, tabs[1].frame.midY)
         XCTAssertLessThan(tabs[1].frame.midY, tabs[2].frame.midY)
         let tabFrames = tabs.map(\.frame)
+        XCTAssertEqual(tabs[2].frame.maxY, expandedHomeFrame.maxY, accuracy: 1)
+        XCTAssertEqual(tabs[2].frame.midX, expandedHomeFrame.midX, accuracy: 1)
+        attach(app, "build92-mine-dock-fixed")
         tabs[1].tap()
         let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             zip(tabs, tabFrames).allSatisfy { tab, frame in
@@ -568,6 +598,7 @@ final class DouDuoUITests: XCTestCase {
             }
         }, object: app)
         XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 8), .completed)
+        attach(app, "build92-messages-dock-fixed")
         XCTAssertFalse(app.buttons["douyin.mine.back"].exists)
         XCTAssertFalse(app.buttons["douyin.messages.back"].exists)
         tabs[2].tap()
@@ -588,7 +619,7 @@ final class DouDuoUITests: XCTestCase {
         attach(app, "build90-compact-comment-header-search-above-list")
         close.tap()
         let previous = current.label
-        app.swipeUp(velocity: .fast)
+        app.windows.firstMatch.swipeUp(velocity: .fast)
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label != %@", previous), object: current)], timeout: 10), .completed)
         XCTAssertEqual(header.frame.minY, headerFrame.minY, accuracy: 1)
         XCTAssertEqual(header.frame.minX, headerFrame.minX, accuracy: 1)
@@ -602,12 +633,12 @@ final class DouDuoUITests: XCTestCase {
     /// routes. Real comments/layout, no synthetic account history or sends.
     func testCommentsAreSharedAcrossRecommendationFollowAndMine() throws {
         continueAfterFailure = false
-        let app = XCUIApplication()
-        app.launchArguments += ["-douyin_muted_v1", "YES"]
-        app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
-        addTeardownBlock { app.terminate() }
         var reference: CGRect?
         for entry in ["home", "follow", "mine"] {
+            let app = XCUIApplication()
+            app.launchArguments += ["-douyin_muted_v1", "YES"]
+            app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
+            addTeardownBlock { app.terminate() }
             app.launchEnvironment["DOUDUO_COMMENT_ENTRY"] = entry
             app.launch()
             let current = app.staticTexts["douyin.currentID"]
@@ -628,8 +659,14 @@ final class DouDuoUITests: XCTestCase {
             XCTAssertTrue(panel.waitForExistence(timeout: 15))
             let header = app.otherElements["douyin.comments.header"].firstMatch
             XCTAssertLessThanOrEqual(header.frame.height, 44)
-            XCTAssertGreaterThan(panel.frame.width, app.frame.width * 0.94,
-                                 "三个入口都应延伸进系统侧栏，不能二次缩窄")
+            if app.windows.firstMatch.frame.width >= 700 {
+                XCTAssertGreaterThan(panel.frame.width, app.windows.firstMatch.frame.width * 0.40)
+                XCTAssertLessThan(panel.frame.width, app.windows.firstMatch.frame.width * 0.52)
+                XCTAssertFalse(app.buttons["douyin.like"].firstMatch.exists)
+                XCTAssertFalse(app.buttons["douyin.dock.home"].firstMatch.isHittable)
+            } else {
+                XCTAssertGreaterThan(panel.frame.width, app.windows.firstMatch.frame.width * 0.94)
+            }
             if let reference {
                 XCTAssertEqual(panel.frame.minX, reference.minX, accuracy: 2)
                 XCTAssertEqual(panel.frame.width, reference.width, accuracy: 2)
@@ -639,11 +676,14 @@ final class DouDuoUITests: XCTestCase {
             XCTAssertTrue(related.waitForExistence(timeout: 15))
             XCTAssertLessThanOrEqual(related.frame.minY, header.frame.maxY + 1)
             let input = app.descendants(matching: .any).matching(identifier: "douyin.comment.input").firstMatch
-            XCTAssertTrue(input.isHittable)
+            XCTAssertTrue(input.waitForExistence(timeout: 10))
+            XCTAssertTrue(input.isHittable, app.debugDescription)
             attach(app, "build90-shared-comments-" + entry)
             input.tap()
             XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+            XCTAssertGreaterThanOrEqual(input.frame.height, 16, "输入文字不能只剩被键盘裁剪后的细线")
             XCTAssertLessThanOrEqual(input.frame.maxY, app.keyboards.firstMatch.frame.minY + 2)
+            print("COMMENT_INPUT_FRAME \(entry) input=\(input.frame) keyboard=\(app.keyboards.firstMatch.frame)")
             attach(app, "build90-shared-comments-keyboard-" + entry)
             app.buttons["douyin.comments.close"].firstMatch.tap()
             app.terminate()
@@ -1753,6 +1793,8 @@ final class DouDuoUITests: XCTestCase {
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {
+        print("DUODUO_CAPTURE " + name)
+        Thread.sleep(forTimeInterval: 2) // Host captures the active Duo display; XCTest screenshots use the inactive outer screen.
         let a = XCTAttachment(screenshot: app.screenshot()); a.name = name; a.lifetime = .keepAlways; add(a)
     }
 }

@@ -1,4 +1,4 @@
-name: Duo UI tests (1.3.11 build 91)
+name: Duo UI tests (1.3.11 build 92)
 
 on:
   workflow_dispatch:

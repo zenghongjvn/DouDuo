@@ -149,15 +149,23 @@ struct DYCommentPaneMetrics {
     let trailingInset: CGFloat
 
     init(_ geo: GeometryProxy, isPresented: Bool, allowsResident: Bool = true,
-         paneFraction: CGFloat = 1 / 3) {
+         paneFraction: CGFloat? = nil) {
         let w = geo.size.width, h = geo.size.height
         resident = allowsResident && DYDuoMetrics.foldIsActive(geo)
         let tableFold = resident && w <= h
         sideBySide = w >= DYDuoMetrics.legacyWideMin || (resident && w > h)
         showsPane = resident || (sideBySide && isPresented)
-        // Measure against the physical screen, including the vertical status bar.
-        let paneW = showsPane && sideBySide
-            ? max(0, (w + geo.safeAreaInsets.trailing) * paneFraction - geo.safeAreaInsets.trailing) : 0
+        // Preserve v1.3.11's comment width. Author panes still split in half.
+        let paneW: CGFloat
+        if showsPane && sideBySide {
+            if let paneFraction {
+                paneW = max(0, (w + geo.safeAreaInsets.trailing) * paneFraction - geo.safeAreaInsets.trailing)
+            } else {
+                paneW = resident ? w * 0.45 : min(380, w * 0.42)
+            }
+        } else {
+            paneW = 0
+        }
         let paneH = tableFold ? h * 0.45 : 0
         videoSize = CGSize(width: w - paneW, height: h - paneH)
         trailingInset = geo.safeAreaInsets.trailing
@@ -166,7 +174,8 @@ struct DYCommentPaneMetrics {
         let containerBottom = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
             .first(where: \.isKeyWindow)?.safeAreaInsets.bottom ?? 0
-        let bottom = min(geo.safeAreaInsets.bottom, containerBottom)
+        let keyboardIsPresented = geo.safeAreaInsets.bottom > containerBottom + 1
+        let bottom = keyboardIsPresented ? 0 : min(geo.safeAreaInsets.bottom, containerBottom)
         paneSize = CGSize(width: sideBySide ? paneW + trailingInset : w,
                           height: tableFold ? paneH : h + geo.safeAreaInsets.top + bottom)
         paneOrigin = CGPoint(x: sideBySide ? videoSize.width : 0,
@@ -207,9 +216,6 @@ struct DYCommentPlayerLayout<Video: View>: View {
                 .toolbarVisibility(layout.showsPane ? .hidden : .automatic, for: .tabBar)
                 .toolbarVisibility(layout.showsPane ? .visible : .hidden, for: .navigationBar)
                 .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
-                .overlayPreferenceValue(DYActiveVideoRailKey.self) { rail in
-                    if layout.showsPane { DYNativeVideoRail(rail: rail) }
-                }
                 .animation(.snappy, value: showComments)
                 .animation(.snappy, value: layout.resident)
                 .sheet(isPresented: Binding(

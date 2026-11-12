@@ -840,6 +840,10 @@ struct DYListPlayer: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("douyin.list.player")
+        // Full-screen works own their chrome; do not inherit the author split
+        // pane's hidden rail or the home page's pinned header.
+        .environment(\.duoSystemBars, false)
+        .environment(\.duoInlineVideoNavigation, false)
         .onChange(of: currentID) { old, new in
             if new == nil, let old { currentID = old; return }
             guard let i = items.firstIndex(where: { $0.id == new }) else { return }
@@ -1390,6 +1394,18 @@ struct DYAuthorScreen: View {
             async let profile: Void = loadProfile(s)
             async let state: Void = loadFollow(s)
             _ = await (profile, state)
+            #if DEBUG
+            // Exercise the real author -> work navigation when a logged-out
+            // posts request returns an empty list. Only a matching public work
+            // is seeded; the release build never includes this test route.
+            if ProcessInfo.processInfo.environment["DOUDUO_AUTHOR_WORK_FIXTURE"] == "1",
+               let id = ProcessInfo.processInfo.environment["DOUDUO_VIDEO_ID"],
+               let item = try? await bridge.awemeDetail(id), item.author.secUid == s {
+                posts = [item]
+                hasMore = false
+                return
+            }
+            #endif
             _ = await loadPosts()
         }
     }
