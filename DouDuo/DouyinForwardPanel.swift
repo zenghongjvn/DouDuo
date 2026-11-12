@@ -14,6 +14,13 @@ struct DYForwardPanelAction: Identifiable {
     let symbol: String
 }
 
+struct DYForwardContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat { 0 }
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 /// 仅负责原生面板内容。父视图控制视频上方的位置、可用宽度、遮罩和发送确认。
 /// 联系人与可用操作均由父视图传入；不在这里读取网页或发送消息。
 struct DYNativeForwardPanel: View {
@@ -51,6 +58,12 @@ struct DYNativeForwardPanel: View {
             actionRow(actions)
                 .padding(.top, 14)
                 .padding(.bottom, 6)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .background {
+            GeometryReader { geo in
+                Color.clear.preference(key: DYForwardContentHeightKey.self, value: geo.size.height)
+            }
         }
         .foregroundStyle(.themeTextPrimary)
         .accessibilityElement(children: .contain)
@@ -146,7 +159,7 @@ struct DYNativeForwardPanel: View {
                                 .font(.title2.weight(.semibold))
                                 .frame(width: avatarSize, height: avatarSize)
                                 .foregroundStyle(.white)
-                                .background(action.id == "private" ? Color(red: 1, green: 0.16, blue: 0.34) : Color.black.opacity(0.3), in: Circle())
+                                .background(actionColor(action.id), in: Circle())
                                 .accessibilityHidden(true)
                             Text(action.title)
                                 .font(.caption)
@@ -165,5 +178,17 @@ struct DYNativeForwardPanel: View {
         }
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityIdentifier("douyin.forward.actions")
+    }
+
+    private func actionColor(_ id: String) -> Color {
+        switch id {
+        case "private": Color(red: 0.94, green: 0.12, blue: 0.30)
+        case "copy": Color(red: 0.15, green: 0.42, blue: 0.88)
+        case "download": Color(red: 0.08, green: 0.50, blue: 0.31)
+        case "other": Color(red: 0.52, green: 0.29, blue: 0.78)
+        case "groups": Color(red: 0.86, green: 0.35, blue: 0.12)
+        case "login": Color(red: 0.05, green: 0.47, blue: 0.56)
+        default: Color(red: 0.32, green: 0.35, blue: 0.40)
+        }
     }
 }

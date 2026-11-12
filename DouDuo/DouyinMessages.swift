@@ -363,6 +363,7 @@ struct DYMessagesScreen: View {
     var body: some View {
         NavigationStack {
             messageContent
+                .accessibilityIdentifier("douyin.messages.root")
                 .modifier(DYSystemTabBar())
                 .navigationTitle(sidebarVisible ? "" : "消息")
                 .navigationBarTitleDisplayMode(.inline)
@@ -1791,12 +1792,8 @@ struct DYForwardPresentation: ViewModifier {
     @State private var showing = false
     func body(content: Content) -> some View {
         content.environment(\.dyForwardAction, { showing = true })
-            .sheet(isPresented: $showing) {
+            .dyBottomSheet(isPresented: $showing, kind: .share) {
                 DYForwardScreen(item: item)
-                    .toolbarVerticalBehavior(.disabled)
-                    .presentationDetents([.height(DDTheme.shareSheetHeight), .large])
-                    .presentationDragIndicator(.hidden)
-                    .presentationCornerRadius(DDTheme.sheetCornerRadius)
             }
     }
 }

@@ -121,7 +121,82 @@ enum DYReservedNudge {
 
 // MARK: - Shared comments presentation
 
-/// Every compact-screen entry uses the same system sheet and one glass surface.
+enum DYBottomSheetKind {
+    case comments, share
+}
+
+extension View {
+    func dyBottomSheet<Panel: View>(isPresented: Binding<Bool>, kind: DYBottomSheetKind,
+                                   @ViewBuilder content: @escaping () -> Panel) -> some View {
+        modifier(DYBottomSheetPresenter(isPresented: isPresented, kind: kind, panel: content))
+    }
+}
+
+/// Compact presentations reach the display edges. A full-screen presentation
+/// supplies modal focus/dismissal; only its bottom panel draws Liquid Glass.
+private struct DYBottomSheetPresenter<Panel: View>: ViewModifier {
+    @Binding var isPresented: Bool
+    let kind: DYBottomSheetKind
+    @ViewBuilder var panel: () -> Panel
+
+    func body(content: Content) -> some View {
+        content.fullScreenCover(isPresented: $isPresented) {
+            DYEdgeBottomPanel(kind: kind, panel: panel)
+                .presentationBackground(.clear)
+        }
+    }
+}
+
+private struct DYEdgeBottomPanel<Panel: View>: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var shareContentHeight = DDTheme.shareSheetHeight
+    let kind: DYBottomSheetKind
+    @ViewBuilder var panel: () -> Panel
+
+    var body: some View {
+        GeometryReader { geo in
+            let panelHeight = kind == .comments
+                ? min(geo.size.height, (geo.size.height + geo.safeAreaInsets.bottom) * 0.62)
+                : min(geo.size.height, shareContentHeight)
+            let trailingHalf = kind == .share && geo.size.width >= DYDuoMetrics.legacyWideMin
+            let panelWidth = trailingHalf ? geo.size.width / 2 : geo.size.width
+            let shape = UnevenRoundedRectangle(
+                topLeadingRadius: DDTheme.sheetCornerRadius,
+                bottomLeadingRadius: 0,
+                bottomTrailingRadius: 0,
+                topTrailingRadius: DDTheme.sheetCornerRadius)
+            ZStack(alignment: .bottomTrailing) {
+                Color.black.opacity(0.2).ignoresSafeArea()
+                    .accessibilityHidden(true)
+                VStack(spacing: 0) {
+                    if kind == .comments {
+                        Capsule().fill(.secondary).frame(width: 36, height: 4)
+                            .frame(maxWidth: .infinity).frame(height: 12)
+                            .contentShape(Rectangle())
+                            .gesture(DragGesture().onEnded { value in
+                                if value.translation.height > 40 { dismiss() }
+                            })
+                            .accessibilityHidden(true)
+                    }
+                    panel()
+                        .onPreferenceChange(DYForwardContentHeightKey.self) { height in
+                            if height > 0 { shareContentHeight = height }
+                        }
+                }
+                .frame(width: panelWidth, height: panelHeight, alignment: .top)
+                .glassEffect(.regular, in: shape)
+                .clipShape(shape)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("douyin.sheet.edgeSurface")
+            }
+        }
+        // Respect the keyboard, while the glass reaches the physical edges.
+        .ignoresSafeArea(.container)
+        .toolbarVerticalBehavior(.disabled)
+    }
+}
+
+/// Every entry shares the same comment content; the presenter owns its surface.
 struct DYCommentSheet: View {
     let bridge: DouyinBridge
     let aweme: DYAweme
@@ -131,9 +206,6 @@ struct DYCommentSheet: View {
     var body: some View {
         DYCommentPanel(bridge: bridge, aweme: aweme, onClose: onClose, focus: focus)
             .toolbarVerticalBehavior(.disabled)
-            .presentationDetents([.fraction(0.62)])
-            .presentationCornerRadius(DDTheme.sheetCornerRadius)
-            .presentationDragIndicator(.visible)
     }
 }
 
@@ -207,21 +279,23 @@ struct DYCommentPlayerLayout<Video: View>: View {
                             .id(aweme.id)
                             .frame(width: layout.paneSize.width, height: layout.paneSize.height)
                             .clipped()
-                            .overlay(alignment: .leading) { if layout.sideBySide { Divider() } }
+                            .overlay(alignment: .leading) {
+                                if layout.sideBySide { Color(uiColor: .separator).frame(width: 0.5) }
+                            }
                             .offset(x: layout.paneOrigin.x, y: layout.paneOrigin.y)
                     }
                 }
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
                 .background(Color.black.ignoresSafeArea())
-                .toolbarVisibility(layout.showsPane ? .hidden : .automatic, for: .tabBar)
+                .toolbarVisibility(showComments || layout.showsPane ? .hidden : .automatic, for: .tabBar)
                 .toolbarVisibility(layout.showsPane ? .visible : .hidden, for: .navigationBar)
                 .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
                 .animation(.snappy, value: showComments)
                 .animation(.snappy, value: layout.resident)
-                .sheet(isPresented: Binding(
+                .dyBottomSheet(isPresented: Binding(
                     get: { showComments && !layout.sideBySide && !layout.resident && aweme != nil },
                     set: { if !layout.sideBySide && !layout.resident { showComments = $0 } }
-                )) {
+                ), kind: .comments) {
                     if let aweme {
                         DYCommentSheet(bridge: bridge, aweme: aweme,
                                        onClose: { showComments = false }, focus: focus)
