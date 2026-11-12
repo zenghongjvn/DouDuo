@@ -1684,7 +1684,6 @@ struct DouyinFeedScreen: View {
                                  authorTarget = nil
                                  showComments = true
                              },
-                             onLive: { r in live.open(r); selectTab(.live) },
                              onShowRecommendations: { selectTab(.recommend) })
             } else {
                 recommendArea

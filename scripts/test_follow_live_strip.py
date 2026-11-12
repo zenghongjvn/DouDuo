@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""我的关注选择器的竖向列表尺寸，以及直播页只保留这一处入口。
+"""我的关注选择器的竖向列表尺寸；关注开播只走直播页「我的关注」一处入口：直播页不挂头像条，关注页不挂直播头像。
 
 Run: python3 scripts/test_follow_live_strip.py -v
 不联网、不开模拟器。
@@ -85,6 +85,13 @@ class FollowLivePickerTests(unittest.TestCase):
         self.assertIn("placeholder:", sheet)
         self.assertIn(".presentationDetents([.height(sheetDetent)])", sheet)
         self.assertIn("struct DYFollowFeed", EXTRAS)
+
+    def test_follow_feed_has_no_live_row(self):
+        """老板定：关注页只放关注作品，不再挂一排直播头像（PR #8 曾加回，1.3.11(88) 再次去掉；直播页已有「我的关注」，89 起直播页也不挂头像条）。"""
+        follow = EXTRAS.split("struct DYFollowFeed", 1)[1]
+        follow = follow.split("\nstruct ", 1)[0]
+        for banned in ("liveRow", "loadLiveNow", "followLiveResult", "DYFollowLiveStrip", 'Text("直播中")', "onLive"):
+            self.assertNotIn(banned, follow, f"关注页不应出现 {banned}")
 
 
 if __name__ == "__main__":

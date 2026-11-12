@@ -1,14 +1,18 @@
-# DouDuo · Duo 定制版
+<p align="center">
+  <img src="docs/brand/app-icon.png" width="128" alt="douduo icon">
+</p>
 
-基于上游 **v1.3.11（d3fa371）**，定制构建 **89**，仅面向 **iPhone Duo / iOS 27.1+**。
+<h1 align="center">douduo · Duo 定制版</h1>
 
-头像与互动操作位于系统状态栏下方，保留数量；三页共用可收起的系统工具栏 Dock，尺寸、位置由系统安排。顶部透明，大屏评论和作者页采用左右分栏。视频左滑作者、右滑关注，仅进度条拖动跳转。播放和网页数据桥继续使用上游实现。
+基于上游 **v1.3.12（64a8ef7）**，定制构建 **93**，仅面向 **iPhone Duo / iOS 27.1+**。
 
-Bundle ID：`com.zenghongjvn.douduo`，可与原版同时安装。未签名包仅包含 arm64；新包不会继承原 Bundle ID 的登录数据。
+沿用 build 92 的布局和交互：三页共用可收起的纵向玻璃 Dock，图标 24 pt，位置由系统工具栏承载；首页默认收起。互动胶囊随视频分页移动，内屏评论打开后隐藏全部互动控件和 Dock。评论保留原版宽度与排版，相关搜索在上方；作者页为左右布局。视频左滑作者、右滑关注，仅进度条拖动跳转。
 
-详细改动、构建与验收说明见 [Duo 定制说明](docs/releases/v1.3.11-duo.md)。本仓库 Actions 的 **Build unsigned IPA** 产物为定制包；下文上游发行版链接及旧截图供原项目参考。
+Bundle ID：`com.zenghongjvn.douduo`，可与原版同时安装。未签名包仅包含 arm64；与上一版定制包使用相同标识。
 
-一个**适配 iPhone Duo（折叠屏）/ iPad / 横屏的第三方抖音客户端**，界面和播放全部原生（SwiftUI + AVPlayer，VLC 兜底）。
+本次合并内容见 [1.3.12 Duo 更新说明](docs/releases/v1.3.12-duo.md)，完整定制行为见 [build 92 布局说明](docs/releases/v1.3.11-duo.md)。本仓库 Actions 的 **Build unsigned IPA** 产物为定制包；下文上游发行版链接及旧截图供原项目参考。
+
+界面和播放全部原生（SwiftUI + AVPlayer，VLC 兜底）。
 
 官方抖音 App 在折叠屏内屏、iPad 上不适配，网页版又总是跳 App，所以有了它。
 
@@ -73,6 +77,7 @@ Bundle ID：`com.zenghongjvn.douduo`，可与原版同时安装。未签名包�
 - **GitHub 下载**：[最新发行版](https://github.com/81199000/DouDuo/releases/latest)
 - GitHub 为主仓库，Gitee 为国内源码与安装包镜像。
 - 下载文件名带 `unsigned.ipa` 的安装包；它是**未签名 IPA，不能下载后直接安装**，需要按下方教程自己签名。
+- v1.3.12 关注页与直播页去掉重复的直播头像入口，关注开播统一走「我的关注」；爱思助手签名失败可先在手机上用同一 Apple ID 登录一次 icloud.com 再签，详见[更新说明](docs/releases/v1.3.12.md)。
 - v1.3.11 消息中心主从导航、聊天分享视频跳原生播放、评论通知回复与配图、聊天黑色画布与窄屏遮挡修复；右侧图标间距加大并调整展开位置；合入直播恢复与播放门禁（分享浮层暂停、切台恢复），详见[更新说明与待验收项](docs/releases/v1.3.11.md)。
 - v1.3.10 倍速控制重做：设置里选播放速度（当前视频立刻生效）、长按下滑锁本条 2 倍速、长按上滑取消、非常速常驻角标；新增后台播放与锁屏控制、直播间选择列表、直播画质选档，详见[更新说明](docs/releases/v1.3.10.md)。
 - v1.3.9 把「关注的人正在直播」头像排移到直播页顶部：进入展开、上滑换直播间收成「N 个直播」胶囊，关注页回归纯关注流，详见[更新说明](docs/releases/v1.3.9.md)。
@@ -87,7 +92,7 @@ Bundle ID：`com.zenghongjvn.douduo`，可与原版同时安装。未签名包�
 
 ### 方式一：爱思助手（Windows / Mac，最简单）
 
-以下配图来自[爱思助手官方 IPA 签名教程](https://www.i4.cn/news_detail_38195.html)；**图中的应用文件名仅为官方示例，实际请选择我们下载的 `DouDuo-1.3.11-unsigned.ipa`**。
+以下配图来自[爱思助手官方 IPA 签名教程](https://www.i4.cn/news_detail_38195.html)；**图中的应用文件名仅为官方示例，实际请选择我们下载的 `DouDuo-1.3.12-unsigned.ipa`**。
 
 #### 1. 连接手机，打开 IPA 签名工具
 
@@ -106,6 +111,8 @@ Bundle ID：`com.zenghongjvn.douduo`，可与原版同时安装。未签名包�
 选择 **使用 Apple ID 签名 → 添加 Apple ID**，在爱思助手内输入 Apple ID 和密码（建议使用专门的小号），并选择当前连接手机的设备标识。签名与所选设备绑定，不要选成其他手机；如要求验证码，请在签名工具中完成验证。
 
 ![添加 Apple ID 并选择设备标识](docs/install/i4/03-apple-id.png)
+
+> **签名失败时：先用同一个 Apple ID 登录一次 iCloud。** 在手机 Safari 打开 [icloud.com](https://www.icloud.com)，用**准备签名的那一个 Apple ID** 登录一次（按提示同意条款、完成双重认证），退出页面后回爱思助手重新点「开始签名」。很多人卡在「签名失败 / 验证失败 / 无法请求签名」，都是因为该 Apple ID 没在设备上登录过 iCloud，登录一次再签通常就能过。
 
 #### 4. 勾选安装包和 Apple ID，开始签名
 

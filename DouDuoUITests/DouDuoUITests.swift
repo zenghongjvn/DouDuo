@@ -1726,7 +1726,10 @@ final class DouDuoUITests: XCTestCase {
     }
 
     func testFollowedLivePickerRestoresRecommendation() throws {
+        continueAfterFailure = false
         let app = XCUIApplication()
+        app.launchArguments += ["-douyin_muted_v1", "YES"]
+        addTeardownBlock { app.terminate() }
         app.launchEnvironment["DOUDUO_STARTLIVE"] = "1"
         app.launchEnvironment["DOUDUO_LIVEMOCK"] = "1"
         app.launchEnvironment["DOUDUO_FOLLOWMOCK"] = "rooms"
@@ -1757,7 +1760,7 @@ final class DouDuoUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "label == 'rec-a'"), evaluatedWith: current)], timeout: 5), .completed, "退出应回到原来的推荐直播")
         XCTAssertTrue(app.buttons["live.follow"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["live.discover"].exists)
-        app.swipeUp(velocity: .slow)
+        app.windows.firstMatch.swipeUp(velocity: .slow)
         XCTAssertEqual(XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "label == 'rec-b'"), evaluatedWith: current)], timeout: 5), .completed, "回到推荐后只能滑到原来的下一间")
     }
 
@@ -1783,6 +1786,34 @@ final class DouDuoUITests: XCTestCase {
         XCTAssertTrue(login.staticTexts["live.follow.login"].waitForExistence(timeout: 5))
         XCTAssertTrue(login.buttons["live.follow.login.button"].exists)
         XCTAssertFalse(login.staticTexts["live.follow.empty"].exists)
+    }
+
+    /// 关注开播只走直播页「我的关注」：直播页不挂头像条，关注页不挂直播头像。
+    func testFollowLiveOnlyViaMyFollowButton() throws {
+        continueAfterFailure = false
+        let live = XCUIApplication()
+        live.launchArguments += ["-douyin_muted_v1", "YES"]
+        addTeardownBlock { live.terminate() }
+        live.launchEnvironment["DOUDUO_STARTLIVE"] = "1"
+        live.launchEnvironment["DOUDUO_LIVEMOCK"] = "1"
+        live.launchEnvironment["DOUDUO_FOLLOWMOCK"] = "rooms"
+        live.launch()
+        XCTAssertTrue(live.buttons["live.follow"].waitForExistence(timeout: 10), "「我的关注」入口保留")
+        sleep(2)
+        attach(live, "live-no-strip")
+        XCTAssertFalse(live.scrollViews["live.follow.strip"].exists, "直播页不再挂关注头像条")
+        XCTAssertFalse(live.buttons["live.follow.pill"].exists)
+        live.terminate()
+
+        let follow = XCUIApplication()
+        follow.launchArguments += ["-douyin_muted_v1", "YES"]
+        addTeardownBlock { follow.terminate() }
+        follow.launchEnvironment["DOUDUO_STARTFOLLOW"] = "1"
+        follow.launchEnvironment["DOUDUO_FOLLOWMOCK"] = "rooms"
+        follow.launch()
+        XCTAssertTrue(follow.otherElements["douyin.follow.feed"].waitForExistence(timeout: 15))
+        attach(follow, "follow-no-live-row")
+        XCTAssertFalse(follow.staticTexts["直播中"].exists, "关注页不应出现直播头像")
     }
 
     /// 底部进度条左侧时间（秒）
