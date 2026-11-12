@@ -16,6 +16,8 @@
 		28289ABD1DCF4363BEB6CB68 /* DouyinApiScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF797925E3FB7C48C8F83594 /* DouyinApiScanner.swift */; };
 		2ECF269C61C88FFF8EFD2169 /* VLCKitSPM in Frameworks */ = {isa = PBXBuildFile; productRef = 0ABFD1885FF4C1B4325A07D2 /* VLCKitSPM */; };
 		3B13F9FF35F86C692E05E251 /* DouyinForwardPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 247A523C254CDEF946BEA5A1 /* DouyinForwardPanel.swift */; };
+		42139F0030A636D500C50C61 /* DYVideoOptionsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42139EFF30A636D500C50C61 /* DYVideoOptionsPanel.swift */; };
+		42139F2F30A656AB00C50C61 /* DYPictureInPicture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42139F2E30A656AB00C50C61 /* DYPictureInPicture.swift */; };
 		47623E6242FA5EC16A23DB92 /* DouyinBridge+More.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3047845F7A9772A8895D65E3 /* DouyinBridge+More.swift */; };
 		47FEEF8C736CB36FD20BA396 /* ShortVideoPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 960FE5102A00176B7013B057 /* ShortVideoPlayer.swift */; };
 		48F46B135907F902C9B20475 /* CachedAsyncImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3213D784302224EDB7868AF3 /* CachedAsyncImage.swift */; };
@@ -61,6 +63,8 @@
 		3213D784302224EDB7868AF3 /* CachedAsyncImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CachedAsyncImage.swift; sourceTree = "<group>"; };
 		366286F958759FA9BE49695E /* DouyinRelatedSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DouyinRelatedSearch.swift; sourceTree = "<group>"; };
 		36A92ADB714F1273A5B9648B /* DouyinCommentApiProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DouyinCommentApiProbe.swift; sourceTree = "<group>"; };
+		42139EFF30A636D500C50C61 /* DYVideoOptionsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DYVideoOptionsPanel.swift; sourceTree = "<group>"; };
+		42139F2E30A656AB00C50C61 /* DYPictureInPicture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DYPictureInPicture.swift; sourceTree = "<group>"; };
 		4533C36FD7AE2A46CAA52B82 /* DouDuo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DouDuo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		4A3202317C2541C9EFEC8DBF /* DouyinLiveChat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DouyinLiveChat.swift; sourceTree = "<group>"; };
 		54934A09C570DF5D3F0042DC /* DouyinExpandableTitle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DouyinExpandableTitle.swift; sourceTree = "<group>"; };
@@ -138,6 +142,8 @@
 				E8C00A82D0DF6727AA1E57D1 /* Theme.swift */,
 				D33BFCEEAF50CAF105B25611 /* UpdateChecker.swift */,
 				9015DABC86424C9FA5DDBA1E /* VLCPlayerBridge.swift */,
+				42139EFF30A636D500C50C61 /* DYVideoOptionsPanel.swift */,
+				42139F2E30A656AB00C50C61 /* DYPictureInPicture.swift */,
 			);
 			path = DouDuo;
 			sourceTree = "<group>";
@@ -288,6 +294,7 @@
 				DC990FC343EDD6CE18CCCB91 /* DYMessageNavigation.swift in Sources */,
 				E011DD890000000000000002 /* DYNavigationDock.swift in Sources */,
 				E011DD900000000000000002 /* DYVideoMoreMenu.swift in Sources */,
+				42139F0030A636D500C50C61 /* DYVideoOptionsPanel.swift in Sources */,
 				844D4A4311515599F9DF42DE /* DouDuoApp.swift in Sources */,
 				28289ABD1DCF4363BEB6CB68 /* DouyinApiScanner.swift in Sources */,
 				47623E6242FA5EC16A23DB92 /* DouyinBridge+More.swift in Sources */,
@@ -314,6 +321,7 @@
 				D3DE2156FEFF721744FDB55E /* Theme.swift in Sources */,
 				18EC4F1B223F415D3E4CB8F7 /* UpdateChecker.swift in Sources */,
 				26559796455EB77627AA7093 /* VLCPlayerBridge.swift in Sources */,
+				42139F2F30A656AB00C50C61 /* DYPictureInPicture.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -334,7 +342,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 94;
+				CURRENT_PROJECT_VERSION = 95;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = DouDuo/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = DouDuo;
@@ -363,7 +371,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 94;
+				CURRENT_PROJECT_VERSION = 95;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = DouDuo/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = DouDuo;
@@ -390,7 +398,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
-				CURRENT_PROJECT_VERSION = 94;
+				CURRENT_PROJECT_VERSION = 95;
 				GENERATE_INFOPLIST_FILE = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -468,7 +476,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
-				CURRENT_PROJECT_VERSION = 94;
+				CURRENT_PROJECT_VERSION = 95;
 				GENERATE_INFOPLIST_FILE = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

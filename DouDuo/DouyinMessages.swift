@@ -1776,42 +1776,6 @@ struct DYEdgeSwipeBack: ViewModifier {
 
 // MARK: - 当前作品转发给抖音朋友
 
-private struct DYForwardActionKey: EnvironmentKey {
-    static let defaultValue: (() -> Void)? = nil
-}
-private extension EnvironmentValues {
-    var dyForwardAction: (() -> Void)? {
-        get { self[DYForwardActionKey.self] }
-        set { self[DYForwardActionKey.self] = newValue }
-    }
-}
-
-/// 状态挂在稳定的菜单外层，而不是会随原生菜单关闭而销毁的条目里。
-struct DYForwardPresentation: ViewModifier {
-    let item: DYAweme
-    @State private var showing = false
-    func body(content: Content) -> some View {
-        content.environment(\.dyForwardAction, { showing = true })
-            .dyBottomSheet(isPresented: $showing, kind: .share) {
-                DYForwardScreen(item: item)
-            }
-    }
-}
-
-struct DYForwardMenu: View {
-    let item: DYAweme
-    let bridge: DouyinBridge?
-    let foreground: Color
-    @Environment(\.dyForwardAction) private var showFriends
-    var body: some View {
-        Button { showFriends?() } label: {
-            Label("转发", systemImage: "arrowshape.turn.up.right")
-        }
-        .disabled(showFriends == nil)
-        .accessibilityIdentifier("douyin.forward.menu")
-    }
-}
-
 /// 原生转发浮层；官网仅作后台数据与发送桥，登录时才显式进入官网。
 struct DYForwardScreen: View {
     let item: DYAweme

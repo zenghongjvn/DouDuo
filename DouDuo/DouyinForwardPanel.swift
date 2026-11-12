@@ -57,7 +57,7 @@ struct DYNativeForwardPanel: View {
             Divider().padding(.top, 14)
             actionRow(actions)
                 .padding(.top, 14)
-                .padding(.bottom, 6)
+                .padding(.bottom, max(20, DYDuoMetrics.windowBottomInset + 4))
         }
         .fixedSize(horizontal: false, vertical: true)
         .background {

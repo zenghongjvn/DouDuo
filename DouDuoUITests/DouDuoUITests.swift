@@ -13,10 +13,183 @@ final class DouDuoUITests: XCTestCase {
         }
     }
 
+    func testCleanScreenRestoresStableSidebar() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += ["-douyin_muted_v1", "YES", "-douyin_autoplay_v1", "NO"]
+        app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
+        addTeardownBlock { app.terminate() }
+        app.launch()
+        let current = app.staticTexts["douyin.currentID"]
+        XCTAssertTrue(current.waitForExistence(timeout: 40))
+        XCTAssertTrue(wait(label: "7678628867820506406", on: current, timeout: 45))
+        attach(app, "build95-clean-before")
+        let clear = app.buttons["douyin.cleanScreen"].firstMatch
+        let share = app.buttons["douyin.share"].firstMatch
+        let home = app.buttons["首页"].firstMatch
+        XCTAssertTrue(clear.isHittable)
+        let originalShare = share.frame
+        let originalHome = home.frame
+        let originalID = current.label
+        for round in 1...2 {
+            clear.tap()
+            let onlyClear = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                let visible = app.buttons.allElementsBoundByIndex.filter(\.isHittable)
+                return visible.count == 1 && visible.first?.identifier == "douyin.cleanScreen"
+            }, object: app)
+            XCTAssertEqual(XCTWaiter.wait(for: [onlyClear], timeout: 5), .completed, app.debugDescription)
+            XCTAssertEqual(clear.label, "退出清屏")
+            XCTAssertFalse(app.otherElements["douyin.progress"].exists)
+            XCTAssertFalse(app.otherElements["douyin.video.info"].exists)
+            XCTAssertEqual(current.label, originalID, "清屏不能重建或切换播放器")
+            if round == 1 {
+                app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.4)).press(forDuration: 0.8)
+                XCTAssertFalse(app.buttons["douyin.options.close"].exists, "清屏时中间长按不弹出菜单")
+                attach(app, "build95-clean-only-toggle")
+            }
+            clear.tap()
+            XCTAssertTrue(share.waitForExistence(timeout: 5))
+            attach(app, "build95-clean-restored-\(round)")
+            XCTAssertTrue(app.buttons["douyin.search"].isHittable)
+            XCTAssertTrue(app.buttons["douyin.more"].isHittable)
+            for _ in 0..<8 {
+                XCTAssertEqual(share.frame.minY, originalShare.minY, accuracy: 1, "恢复后侧栏不能反复跳动")
+                XCTAssertEqual(home.frame, originalHome)
+                XCTAssertFalse(app.buttons["BottomOverflowBarButtonItem"].exists)
+                Thread.sleep(forTimeInterval: 0.3)
+            }
+        }
+    }
+
+    func testCleanScreenStartsSystemPictureInPicture() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += ["-douyin_muted_v1", "YES", "-douyin_bg_play_v1", "NO", "-douyin_autoplay_v1", "NO"]
+        app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
+        addTeardownBlock { app.terminate() }
+        app.launch()
+        let current = app.staticTexts["douyin.currentID"]
+        XCTAssertTrue(current.waitForExistence(timeout: 40))
+        XCTAssertTrue(wait(label: "7678628867820506406", on: current, timeout: 45))
+        _ = app.screenshot()
+        app.buttons["douyin.cleanScreen"].tap()
+        let state = app.staticTexts["douyin.video.pipState"].firstMatch
+        if state.label == "unsupported" {
+            throw XCTSkip("当前 Duo 运行环境的 AVPictureInPictureController.isPictureInPictureSupported 返回 false，需真机确认系统小窗")
+        }
+        XCTAssertTrue(wait(label: "ready", on: state, timeout: 15), app.debugDescription)
+        XCUIDevice.shared.press(.home)
+        Thread.sleep(forTimeInterval: 3)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        print("PIP_SYSTEM_UI " + springboard.debugDescription)
+        print("DUODUO_CAPTURE build95-pip-background")
+        Thread.sleep(forTimeInterval: 2)
+        app.activate()
+        XCTAssertTrue(app.buttons["douyin.cleanScreen"].waitForExistence(timeout: 10))
+        XCTAssertEqual(current.label, "7678628867820506406")
+        attach(app, "build95-pip-restored")
+        app.buttons["douyin.cleanScreen"].tap()
+        XCTAssertTrue(app.buttons["douyin.comments"].waitForExistence(timeout: 5))
+    }
+
+    func testLongPressZonesAndSettingsMigration() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += ["-douyin_muted_v1", "YES", "-douyin_autoplay_v1", "NO"]
+        app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
+        addTeardownBlock { app.terminate() }
+        app.launch()
+        let current = app.staticTexts["douyin.currentID"]
+        XCTAssertTrue(current.waitForExistence(timeout: 40))
+        XCTAssertTrue(wait(label: "7678628867820506406", on: current, timeout: 45))
+        attach(app, "build95-long-press-before")
+        print("GESTURE_WINDOW \(app.windows.firstMatch.frame) APP \(app.frame)")
+        let count = app.staticTexts["douyin.video.boostStarts"].firstMatch
+        let options = app.buttons["douyin.options.close"].firstMatch
+        for (index, x) in [0.15, 0.78].enumerated() {
+            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: x, dy: 0.4)).press(forDuration: 0.8)
+            XCTAssertEqual(count.label, String(index + 1))
+            XCTAssertFalse(options.exists, "两侧只触发倍速")
+        }
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.4)).press(forDuration: 0.8)
+        XCTAssertTrue(options.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(count.label, "2", "中间长按不能启动倍速")
+        attach(app, "build95-options-top")
+        XCTAssertTrue(app.buttons["douyin.options.fit"].isHittable)
+        XCTAssertTrue(app.switches["横屏时只放横屏内容"].exists, "内容偏好默认展开")
+        attach(app, "build95-options-top")
+        app.buttons["douyin.options.rate.1.5"].tap()
+        attach(app, "build95-options-rate-selected")
+        let selectedRate = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.buttons["douyin.options.rate.1.5"].isSelected
+        }, object: app)
+        XCTAssertEqual(XCTWaiter.wait(for: [selectedRate], timeout: 5), .completed)
+        app.buttons["douyin.options.rate.1.0"].tap()
+        let list = app.scrollViews["douyin.options.list"].firstMatch
+        list.swipeUp()
+        XCTAssertTrue(app.switches["显示弹幕"].isHittable, app.debugDescription)
+        XCTAssertTrue(app.switches["10秒内重复去重"].isHittable)
+        attach(app, "build95-options-danmaku-expanded")
+        app.buttons["douyin.options.close"].tap()
+        XCTAssertTrue(options.waitForNonExistence(timeout: 5))
+        app.buttons["douyin.more"].firstMatch.tap()
+        XCTAssertFalse(app.buttons["douyin.dislike"].exists)
+        XCTAssertFalse(app.buttons["douyin.danmaku.settings"].exists)
+        XCTAssertFalse(app.buttons["转发"].exists)
+        XCTAssertFalse(app.buttons["douyin.save"].exists)
+        XCTAssertFalse(app.buttons["设置"].exists, "更多直接显示设置内的栏目")
+        XCTAssertFalse(app.buttons["播放设置"].exists)
+        XCTAssertFalse(app.buttons["内容偏好"].exists)
+        XCTAssertTrue(app.buttons["缓存管理"].exists)
+        XCTAssertTrue(app.buttons["账号与登录"].exists)
+        XCTAssertTrue(app.buttons["关于"].exists)
+        attach(app, "build95-more-retained-settings")
+    }
+
+    func testCommentsPullDownAndHeaderSpacing() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += ["-douyin_muted_v1", "YES", "-douyin_autoplay_v1", "NO"]
+        app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
+        addTeardownBlock { app.terminate() }
+        app.launch()
+        let current = app.staticTexts["douyin.currentID"]
+        XCTAssertTrue(current.waitForExistence(timeout: 40))
+        XCTAssertTrue(wait(label: "7678628867820506406", on: current, timeout: 45))
+        let comments = app.buttons["douyin.comments"].firstMatch
+        comments.tap()
+        let header = app.otherElements["douyin.comments.header"].firstMatch
+        let panel = app.otherElements["douyin.comments.panel"].firstMatch
+        XCTAssertTrue(header.waitForExistence(timeout: 10))
+        XCTAssertEqual(header.frame.minY, panel.frame.minY, accuracy: 1, "顶部不保留横条占位")
+        let related = app.scrollViews["douyin.comments.relatedSearch"].firstMatch
+        if related.waitForExistence(timeout: 10) {
+            XCTAssertLessThanOrEqual(related.frame.minY, header.frame.maxY + 1)
+            XCTAssertLessThanOrEqual(related.frame.height, 26)
+        }
+        attach(app, "build95-comments-tight-header")
+        let list = app.scrollViews["douyin.comments.list"].firstMatch
+        list.swipeUp()
+        list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
+            .press(forDuration: 0.05, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)))
+        XCTAssertTrue(header.exists, "列表从中间往回滚动不能误关闭")
+        let start = header.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 130)))
+        XCTAssertTrue(header.waitForNonExistence(timeout: 5), "标题区下拉可关闭")
+        XCTAssertTrue(comments.waitForExistence(timeout: 5))
+        comments.tap()
+        XCTAssertTrue(header.waitForExistence(timeout: 10))
+        let top = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        top.press(forDuration: 0.05, thenDragTo: top.withOffset(CGVector(dx: 0, dy: 160)))
+        XCTAssertTrue(header.waitForNonExistence(timeout: 5), "列表顶部下拉可关闭")
+        XCTAssertTrue(comments.waitForExistence(timeout: 5))
+        attach(app, "build95-comments-pull-closed")
+    }
+
     func testInnerShareUsesTrailingHalf() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments += ["-douyin_muted_v1", "YES"]
+        app.launchArguments += ["-douyin_muted_v1", "YES", "-douyin_autoplay_v1", "NO"]
         app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
         app.launchEnvironment["DOUDUO_FORWARD_LAYOUT_FIXTURE"] = "1"
         addTeardownBlock { app.terminate() }
@@ -25,6 +198,7 @@ final class DouDuoUITests: XCTestCase {
         XCTAssertTrue(current.waitForExistence(timeout: 40))
         XCTAssertTrue(wait(label: "7678628867820506406", on: current, timeout: 45))
         guard app.windows.firstMatch.frame.width >= 700 else { throw XCTSkip("仅验收 Duo 内屏横向布局") }
+        _ = app.screenshot()
         app.buttons["douyin.share"].firstMatch.tap()
         XCTAssertTrue(app.buttons["douyin.forward.contact.layout-fixture-1"].waitForExistence(timeout: 15))
         let panel = app.otherElements["douyin.sheet.edgeSurface"].firstMatch
@@ -34,7 +208,8 @@ final class DouDuoUITests: XCTestCase {
         XCTAssertEqual(surface.frame.width, app.windows.firstMatch.frame.width / 2, accuracy: 1)
         XCTAssertEqual(surface.frame.maxY, app.windows.firstMatch.frame.maxY, accuracy: 1)
         let actions = app.buttons["douyin.forward.action.copy"]
-        XCTAssertLessThanOrEqual(surface.frame.maxY - actions.frame.maxY, 14)
+        XCTAssertGreaterThanOrEqual(surface.frame.maxY - actions.frame.maxY, 20)
+        XCTAssertLessThanOrEqual(surface.frame.maxY - actions.frame.maxY, 40)
         attach(app, "build94-inner-share-trailing-two-rows")
         app.buttons["douyin.forward.close"].tap()
     }
@@ -44,7 +219,7 @@ final class DouDuoUITests: XCTestCase {
     func testNativeDockRestoresAfterClosingComments() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments += ["-douyin_muted_v1", "YES"]
+        app.launchArguments += ["-douyin_muted_v1", "YES", "-douyin_autoplay_v1", "NO"]
         app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
         addTeardownBlock { app.terminate() }
         app.launch()
@@ -85,6 +260,21 @@ final class DouDuoUITests: XCTestCase {
             XCTAssertEqual(home.frame.width, originalHome.width, accuracy: 1, "关闭评论后必须恢复单项收起按钮，而非保留展开的系统选择器")
             XCTAssertEqual(home.frame.maxY, originalHome.maxY, accuracy: 2)
         }
+        for round in 1...3 {
+            let avatar = app.buttons["douyin.author.avatar"].firstMatch
+            XCTAssertTrue(avatar.isHittable)
+            avatar.tap()
+            let back = app.buttons["douyin.author.back"].firstMatch
+            XCTAssertTrue(back.waitForExistence(timeout: 12), "头像必须进入作者页")
+            back.tap()
+            let restored = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                comment.exists && comment.isHittable && share.isHittable
+            }, object: app)
+            XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 10), .completed)
+            attach(app, "build95-author-return-" + String(round))
+            XCTAssertEqual(home.frame.width, originalHome.width, accuracy: 1)
+            XCTAssertFalse(app.buttons["BottomOverflowBarButtonItem"].exists, "互动栏不能进入省略菜单")
+        }
     }
 
     func testInnerPortraitSeparatesActionsAndDock() throws {
@@ -92,7 +282,7 @@ final class DouDuoUITests: XCTestCase {
         // Device Hub controls the foldable display's physical rotation;
         // XCUIDevice.orientation alone does not rotate this Duo runtime.
         let app = XCUIApplication()
-        app.launchArguments += ["-douyin_muted_v1", "YES"]
+        app.launchArguments += ["-douyin_muted_v1", "YES", "-douyin_autoplay_v1", "NO"]
         app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
         addTeardownBlock { app.terminate() }
         app.launch()
@@ -126,7 +316,7 @@ final class DouDuoUITests: XCTestCase {
     func testCompactSheetsReachEdgesAndKeepInputClear() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments += ["-douyin_muted_v1", "YES"]
+        app.launchArguments += ["-douyin_muted_v1", "YES", "-douyin_autoplay_v1", "NO"]
         app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
         app.launchEnvironment["DOUDUO_FORWARD_LAYOUT_FIXTURE"] = "1"
         addTeardownBlock { app.terminate() }
@@ -150,7 +340,7 @@ final class DouDuoUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(composer.frame.height, 44)
         XCTAssertLessThanOrEqual(list.frame.maxY, composer.frame.minY + 1)
         XCTAssertGreaterThanOrEqual(input.frame.height, 20)
-        XCTAssertGreaterThanOrEqual(window.frame.maxY - input.frame.maxY, 9)
+        XCTAssertGreaterThanOrEqual(window.frame.maxY - input.frame.maxY, 18)
         attach(app, "build94-outer-comments-edge-input")
         list.swipeUp()
         attach(app, "build94-outer-comments-scrolled-clipped")
@@ -160,6 +350,7 @@ final class DouDuoUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(input.frame.height, 20)
         attach(app, "build94-outer-comments-keyboard")
         app.buttons["douyin.comments.close"].firstMatch.tap()
+        _ = app.screenshot()
         app.buttons["douyin.share"].firstMatch.tap()
         XCTAssertTrue(app.buttons["douyin.forward.contact.layout-fixture-1"].waitForExistence(timeout: 15))
         XCTAssertEqual(surface.frame.minX, window.frame.minX, accuracy: 1)
@@ -627,8 +818,11 @@ final class DouDuoUITests: XCTestCase {
 
     /// 倍速两条线互不污染：设置是全局速度（当前视频立刻生效），长按下滑锁的 2 倍只锁本条、上滑取消。
     func testPlaybackRateLockedByLongPressDownAndSetting() throws {
+        continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7705789488781932361"
+        app.launchArguments += ["-douyin_muted_v1", "YES", "-douyin_autoplay_v1", "NO"]
+        addTeardownBlock { app.terminate() }
+        app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
         app.launch()
         XCTAssertTrue(app.staticTexts["douyin.currentID"].waitForExistence(timeout: 40))
         sleep(3)
@@ -639,13 +833,14 @@ final class DouDuoUITests: XCTestCase {
         openSpeedMenu(app)
         XCTAssertTrue(app.buttons["正常速度"].waitForExistence(timeout: 5))
         app.buttons["正常速度"].tap()
+        app.buttons["douyin.options.close"].tap()
         XCTAssertTrue(wait(label: "1", on: setting, timeout: 8), "设置应是 1 倍，当前 \(setting.label)")
         sleep(1)
         XCTAssertNil(visibleBadge(app), "1 倍速不该显示角标")
 
         // 2. 长按下滑：锁定本条 2 倍（松手后常驻角标），且不写进设置
-        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.40))
-        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.58))
+        let start = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.40))
+        let end = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.58))
         start.press(forDuration: 0.9, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.4)
         XCTAssertTrue(waitBadge(app, "2×", timeout: 8), "长按下滑应锁定 2 倍，当前 \(visibleBadge(app)?.label ?? "无角标")")
         XCTAssertEqual(setting.label, "1", "长按锁定不能改设置里的全局速度")
@@ -655,20 +850,24 @@ final class DouDuoUITests: XCTestCase {
         openSpeedMenu(app)
         XCTAssertTrue(app.buttons["1.5 倍速"].waitForExistence(timeout: 5))
         app.buttons["1.5 倍速"].tap()
+        app.buttons["douyin.options.close"].tap()
         XCTAssertTrue(waitBadge(app, "1.5×", timeout: 8), "设置改 1.5 倍当前视频应立刻生效，当前 \(visibleBadge(app)?.label ?? "无角标")")
         XCTAssertEqual(setting.label, "1.5")
         attach(app, "rate-1-5x-badge")
 
         // 4. 长按上滑：取消 2 倍，回到设置的 1.5 倍
-        let up = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.24))
+        let up = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.24))
         start.press(forDuration: 0.9, thenDragTo: up, withVelocity: .slow, thenHoldForDuration: 0.4)
         XCTAssertTrue(waitBadge(app, "1.5×", timeout: 8), "上滑应取消倍速，当前 \(visibleBadge(app)?.label ?? "无角标")")
         attach(app, "rate-cancelled")
+        openSpeedMenu(app)
+        app.buttons["正常速度"].tap()
+        app.buttons["douyin.options.close"].tap()
     }
 
     /// 分页里每页都挂了角标，只取屏幕上那个
     private func visibleBadge(_ app: XCUIApplication) -> XCUIElement? {
-        let f = app.frame
+        let f = app.windows.firstMatch.frame
         return app.staticTexts.matching(identifier: "douyin.rateBadge").allElementsBoundByIndex.first {
             $0.frame.midY > f.minY && $0.frame.midY < f.maxY && $0.frame.midX > f.minX && $0.frame.midX < f.maxX
         }
@@ -683,19 +882,11 @@ final class DouDuoUITests: XCTestCase {
         return false
     }
 
-    /// 更多 → 设置 → 播放设置 → 播放速度
+    /// 中间长按 → 默认展开的视频播放设置。
     private func openSpeedMenu(_ app: XCUIApplication) {
-        let more = app.buttons.matching(identifier: "douyin.more").allElementsBoundByIndex.filter { $0.isHittable }
-        XCTAssertFalse(more.isEmpty, "当前页没有可点的「更多」")
-        more[0].tap()
-        if !app.buttons["设置"].waitForExistence(timeout: 4) { more[0].tap() }
-        XCTAssertTrue(app.buttons["设置"].waitForExistence(timeout: 5))
-        app.buttons["设置"].tap()
-        if !app.buttons["播放设置"].waitForExistence(timeout: 3), app.buttons["设置"].exists { app.buttons["设置"].tap() }
-        XCTAssertTrue(app.buttons["播放设置"].waitForExistence(timeout: 5))
-        app.buttons["播放设置"].tap()
-        XCTAssertTrue(app.buttons["播放速度"].waitForExistence(timeout: 5), "播放设置里应有「播放速度」")
-        app.buttons["播放速度"].tap()
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4))
+            .press(forDuration: 0.8)
+        XCTAssertTrue(app.buttons["douyin.options.rate.1.0"].waitForExistence(timeout: 5))
     }
 
     private func wait(label: String, on element: XCUIElement, timeout: TimeInterval) -> Bool {
@@ -874,12 +1065,24 @@ final class DouDuoUITests: XCTestCase {
         let id = current.label
         let zoom = app.staticTexts.matching(identifier: "douyin.video.zoom").firstMatch
         let fitMode = app.staticTexts.matching(identifier: "douyin.video.fitMode").firstMatch
-        let gesture = app.otherElements.matching(identifier: "douyin.video.gestures").firstMatch
-        XCTAssertTrue(gesture.waitForExistence(timeout: 10))
+        // Synchronize XCTest's touch coordinates with the actual Duo display.
+        attach(app, "build95-pinch-before")
+        // The transparent UIKit gesture host is not an accessibility hit target.
+        // Pinch the visible window so XCTest uses the physical display bounds.
+        let gesture = app.windows.firstMatch
+        // Launch arguments override later UserDefaults writes. Set this
+        // mutable preference through its real control, so pinching can change it.
+        if fitMode.label != "fill" {
+            openSpeedMenu(app)
+            app.buttons["douyin.options.fit"].tap()
+            app.buttons["douyin.options.close"].tap()
+        }
+        XCTAssertTrue(wait(label: "fill", on: fitMode, timeout: 5))
         gesture.pinch(withScale: 0.65, velocity: -1)
         XCTAssertTrue(wait(label: "fit", on: fitMode, timeout: 5))
         XCTAssertTrue(wait(label: "1.00", on: zoom, timeout: 5))
         XCTAssertEqual(current.label, id, "双指缩放不能切换视频")
+        attach(app, "build95-pinch-fit-navigation-check")
         XCTAssertFalse(app.buttons["douyin.author.back"].exists)
         attach(app, "build91-pinch-fit-recentred-blurred-background")
         gesture.pinch(withScale: 2.5, velocity: 1)
@@ -887,12 +1090,12 @@ final class DouDuoUITests: XCTestCase {
         XCTAssertTrue(wait(label: "1.00", on: zoom, timeout: 5))
         XCTAssertEqual(current.label, id)
         attach(app, "build91-pinch-fill-recentred")
-        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.35))
-        let down = app.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.53))
+        let start = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.35))
+        let down = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.53))
         start.press(forDuration: 0.8, thenDragTo: down, withVelocity: .slow, thenHoldForDuration: 0.2)
         XCTAssertTrue(waitBadge(app, "2×", timeout: 5))
         XCTAssertEqual(current.label, id)
-        let up = app.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.20))
+        let up = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.20))
         start.press(forDuration: 0.8, thenDragTo: up, withVelocity: .slow, thenHoldForDuration: 0.2)
         XCTAssertNil(visibleBadge(app))
         attach(app, "build90-long-press-released")
@@ -908,15 +1111,17 @@ final class DouDuoUITests: XCTestCase {
         let current = app.staticTexts["douyin.currentID"]
         XCTAssertTrue(current.waitForExistence(timeout: 40))
         XCTAssertTrue(wait(label: "7678628867820506406", on: current, timeout: 45))
-        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.65))
-        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.2))
+        attach(app, "build95-drag-before")
+        let start = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.65))
+        let end = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.2))
         let boostCount = app.staticTexts["douyin.video.boostStarts"].firstMatch
         XCTAssertEqual(boostCount.label, "0")
         start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 1.2)
         XCTAssertEqual(boostCount.label, "0", "整个拖动及停留过程都不能触发长按，而不只是松手后恢复速度")
         XCTAssertNil(visibleBadge(app), "先拖动再停住不能进入长按倍速")
-        attach(app, "build91-drag-hold-no-boost")
-        let stationary = app.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.35))
+        XCTAssertFalse(app.buttons["douyin.options.close"].exists)
+        attach(app, "build95-drag-hold-no-boost")
+        let stationary = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.35))
         stationary.press(forDuration: 0.8, thenDragTo: start, withVelocity: .slow, thenHoldForDuration: 0.2)
         XCTAssertTrue(waitBadge(app, "2×", timeout: 5), "静止长按后下滑仍能锁定倍速")
         XCTAssertEqual(boostCount.label, "1")
@@ -1862,38 +2067,9 @@ final class DouDuoUITests: XCTestCase {
         XCTAssertEqual(st, "1", "直播流没 ready（status=\(st)）")
     }
 
-    /// 点赞 / 收藏走真接口。
-    /// 未登录时 App 会提示「请先登录抖音」并自动打开网页登录 → 这种情况 skip（不是缺陷）
+    /// Automated layout checks never write likes or collections to the account.
     func testLikeAndCollect() throws {
-        throw XCTSkip("本次只读验收：禁止使用老板账号执行点赞/收藏写接口")
-        let app = XCUIApplication()
-        app.launch()
-        let current = app.staticTexts["douyin.currentID"]
-        XCTAssertTrue(current.waitForExistence(timeout: 30))
-        XCTAssertEqual(XCTWaiter().wait(for: [expectation(for: NSPredicate(format: "label != '-'"), evaluatedWith: current)], timeout: 90), .completed)
-        sleep(6)
-
-        let toast = app.staticTexts["douyin.toast"]
-        let like = app.buttons["douyin.like"].firstMatch
-        XCTAssertTrue(like.waitForExistence(timeout: 10), "没有点赞按钮")
-
-        like.tap()
-        let gotToast = toast.waitForExistence(timeout: 6)
-        let label = gotToast ? toast.label : ""
-        print("DDTEST like toast: \(label.isEmpty ? "<none>" : label)")
-        if label.contains("请先登录") { throw XCTSkip("当前未登录抖音，点赞/收藏需要登录后才能验") }
-        XCTAssertFalse(gotToast, "点赞失败弹了提示：\(label)")
-        attach(app, "like")
-
-        let collect = app.buttons["douyin.collect"].firstMatch
-        XCTAssertTrue(collect.waitForExistence(timeout: 10), "没有收藏按钮")
-        collect.tap()
-        let got2 = toast.waitForExistence(timeout: 10)
-        let label2 = got2 ? toast.label : "<none>"
-        print("DDTEST collect toast: \(label2)")
-        XCTAssertTrue(got2, "收藏后没有提示（接口没返回）")
-        XCTAssertTrue(label2.contains("已收藏"), "收藏没成功：\(label2)")
-        attach(app, "collect")
+        throw XCTSkip("仅只读验收，不执行账号点赞或收藏写操作")
     }
 
     func testFollowedLivePickerRestoresRecommendation() throws {

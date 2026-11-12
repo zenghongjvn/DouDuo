@@ -4,13 +4,24 @@
 import SwiftUI
 
 enum DYDuoMetrics {
-    /// Align full-bleed video chrome to the runtime trailing system column.
-    /// Compact chrome and layouts without a trailing column remain unchanged.
-    static func actionRailHorizontalOffset(isRegular: Bool, trailingInset: CGFloat,
-                                          columnWidth: CGFloat, outerPadding: CGFloat,
-                                          opticalLeadingInset: CGFloat = 0) -> CGFloat {
-        guard isRegular, trailingInset > 0 else { return 0 }
-        return outerPadding + columnWidth / 2 - trailingInset / 2 - opticalLeadingInset
+    /// Full-bleed media and sheets deliberately extend past SwiftUI's safe
+    /// area. Their controls still clear the physical home-indicator region.
+    static var windowBottomInset: CGFloat {
+        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows).first(where: \.isKeyWindow)?.safeAreaInsets.bottom ?? 0
+    }
+
+    static func mediaBottomPadding(_ containerInset: CGFloat) -> CGFloat {
+        // The progress line sits 8 pt above its view's bottom. Lift the info
+        // and progress together, retaining their existing music/line spacing.
+        max(max(containerInset - 16, 8), windowBottomInset - 8)
+    }
+
+    static func bottomSafeAreaOverlap(in proxy: GeometryProxy) -> CGFloat {
+        guard let window = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows).first(where: \.isKeyWindow) else { return 0 }
+        let inset = window.safeAreaInsets.bottom
+        return min(inset, max(0, proxy.frame(in: .global).maxY - (window.bounds.maxY - inset)))
     }
 
     /// iOS 17–27.0 的宽屏回退，和改版前同一条线。
@@ -122,7 +133,16 @@ enum DYReservedNudge {
 // MARK: - Shared comments presentation
 
 enum DYBottomSheetKind {
-    case comments, share
+    case comments, share, options
+}
+
+struct DYSheetDragActions {
+    let update: (CGFloat) -> Void
+    let finish: (Bool) -> Void
+}
+
+extension EnvironmentValues {
+    @Entry var dySheetDrag: DYSheetDragActions? = nil
 }
 
 extension View {
@@ -149,7 +169,9 @@ private struct DYBottomSheetPresenter<Panel: View>: ViewModifier {
 
 private struct DYEdgeBottomPanel<Panel: View>: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var shareContentHeight = DDTheme.shareSheetHeight
+    @State private var dragOffset: CGFloat = 0
     let kind: DYBottomSheetKind
     @ViewBuilder var panel: () -> Panel
 
@@ -157,8 +179,9 @@ private struct DYEdgeBottomPanel<Panel: View>: View {
         GeometryReader { geo in
             let panelHeight = kind == .comments
                 ? min(geo.size.height, (geo.size.height + geo.safeAreaInsets.bottom) * 0.62)
+                : kind == .options ? min(geo.size.height * 0.78, 620)
                 : min(geo.size.height, shareContentHeight)
-            let trailingHalf = kind == .share && geo.size.width >= DYDuoMetrics.legacyWideMin
+            let trailingHalf = kind != .comments && geo.size.width >= DYDuoMetrics.legacyWideMin
             let panelWidth = trailingHalf ? geo.size.width / 2 : geo.size.width
             let shape = UnevenRoundedRectangle(
                 topLeadingRadius: DDTheme.sheetCornerRadius,
@@ -166,19 +189,18 @@ private struct DYEdgeBottomPanel<Panel: View>: View {
                 bottomTrailingRadius: 0,
                 topTrailingRadius: DDTheme.sheetCornerRadius)
             ZStack(alignment: .bottomTrailing) {
-                Color.black.opacity(0.2).ignoresSafeArea()
+                Color.clear.ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { dismiss() }
                     .accessibilityHidden(true)
                 VStack(spacing: 0) {
-                    if kind == .comments {
-                        Capsule().fill(.secondary).frame(width: 36, height: 4)
-                            .frame(maxWidth: .infinity).frame(height: 12)
-                            .contentShape(Rectangle())
-                            .gesture(DragGesture().onEnded { value in
-                                if value.translation.height > 40 { dismiss() }
-                            })
-                            .accessibilityHidden(true)
-                    }
                     panel()
+                        .environment(\.dySheetDrag, DYSheetDragActions(update: { offset in
+                            dragOffset = min(panelHeight, max(0, offset))
+                        }, finish: { shouldClose in
+                            if shouldClose { dismiss() }
+                            else { withAnimation(reduceMotion ? nil : .snappy(duration: 0.22)) { dragOffset = 0 } }
+                        }))
                         .onPreferenceChange(DYForwardContentHeightKey.self) { height in
                             if height > 0 { shareContentHeight = height }
                         }
@@ -186,6 +208,7 @@ private struct DYEdgeBottomPanel<Panel: View>: View {
                 .frame(width: panelWidth, height: panelHeight, alignment: .top)
                 .glassEffect(.regular, in: shape)
                 .clipShape(shape)
+                .offset(y: dragOffset)
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("douyin.sheet.edgeSurface")
             }

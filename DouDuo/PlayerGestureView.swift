@@ -15,6 +15,7 @@ struct PlayerGestureView: UIViewRepresentable {
     var onLongPressLock: () -> Void = {}
     /// 长按后手指上滑一段 → 取消锁定、恢复 1 倍
     var onLongPressUnlock: () -> Void = {}
+    var onContextMenu: (() -> Void)? = nil
     var onSeekBegan: () -> Void
     var onSeekChanged: (CGFloat, CGFloat) -> Void         // (横向位移, 宽度)
     var onSeekEnded: () -> Void
@@ -93,6 +94,7 @@ struct PlayerGestureView: UIViewRepresentable {
         weak var pinch: UIPinchGestureRecognizer?
         private var pressStartY: CGFloat = 0
         private var pressLocked = false
+        private var pressOpensMenu = false
         private weak var frozenScroll: UIScrollView?
         init(_ p: PlayerGestureView) { parent = p }
 
@@ -108,16 +110,24 @@ struct PlayerGestureView: UIViewRepresentable {
             case .began:
                 // Only a recognized hold may turn into the lock/unlock drag.
                 g.allowableMovement = .greatestFiniteMagnitude
-                #if DEBUG
-                DYGestureDiagnostics.shared.boostStarts += 1
-                #endif
-                parent.onLongPress(true)
                 pressStartY = g.location(in: view).y; pressLocked = false
                 // 长按期间下滑不能触发外层切视频：先把外层 ScrollView 的滑动关掉，松手再恢复
                 var p = view?.superview
                 while let x = p, !(x is UIScrollView) { p = x.superview }
                 if let sv = p as? UIScrollView { sv.panGestureRecognizer.isEnabled = false; frozenScroll = sv }
+                let fraction = g.location(in: view).x / max(view?.bounds.width ?? 1, 1)
+                pressOpensMenu = parent.onContextMenu != nil && (0.3...0.7).contains(fraction)
+                if pressOpensMenu {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    parent.onContextMenu?()
+                } else {
+                    #if DEBUG
+                    DYGestureDiagnostics.shared.boostStarts += 1
+                    #endif
+                    parent.onLongPress(true)
+                }
             case .changed:
+                guard !pressOpensMenu else { return }
                 let dy = g.location(in: view).y - pressStartY
                 if !pressLocked, abs(dy) > 50 {
                     pressLocked = true
@@ -128,7 +138,8 @@ struct PlayerGestureView: UIViewRepresentable {
                 g.allowableMovement = 12
                 frozenScroll?.panGestureRecognizer.isEnabled = true; frozenScroll = nil
                 pressLocked = false
-                parent.onLongPress(false)
+                if !pressOpensMenu { parent.onLongPress(false) }
+                pressOpensMenu = false
             default: break
             }
         }

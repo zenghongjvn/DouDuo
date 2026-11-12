@@ -10,7 +10,7 @@ packages:
 settings:
   base:
     MARKETING_VERSION: 1.3.12
-    CURRENT_PROJECT_VERSION: "94"
+    CURRENT_PROJECT_VERSION: "95"
     SWIFT_VERSION: "5.0"
     DEVELOPMENT_TEAM: ""
 targets:
@@ -44,7 +44,7 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
-        # 后台播放：默认仍是切后台就停声；只有「更多」菜单里打开「后台播放」才会继续响（代码里按开关判断）
+        # 普通播放退出即暂停；视频设置可开启后台音频，清屏可使用系统画中画。
         UIBackgroundModes: [audio]
   DouDuoUITests:
     type: bundle.ui-testing

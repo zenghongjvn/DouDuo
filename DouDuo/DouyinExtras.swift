@@ -433,7 +433,7 @@ extension DouyinBridge {
 // MARK: - 弹幕调度策略
 
 /// 仅影响视频滚动弹幕：上方三分之一、密度限流与短时间相同内容去重。
-fileprivate enum DYDanmakuPolicy {
+enum DYDanmakuPolicy {
     static let laneHeight: CGFloat = 28
     static let gap: CGFloat = 28
     static let densityKey = "douyin_video_danmaku_density_v1"
@@ -492,36 +492,6 @@ fileprivate enum DYDanmakuPolicy {
             seenIDs.insert(d.id); lastShown[text] = d.offset; inSecond += 1
         }
         return out
-    }
-}
-
-/// 共用在推荐、关注、搜索等视频的更多菜单，不给巨型视频页新增状态。
-struct DYDanmakuOptions: View {
-    var onSend: (() -> Void)? = nil
-    @AppStorage("douyin_danmaku_v1") private var enabled = true
-    @AppStorage(DYDanmakuPolicy.densityKey) private var density = DYDanmakuPolicy.Density.standard.rawValue
-    @AppStorage(DYDanmakuPolicy.deduplicateKey) private var deduplicate = true
-
-    var body: some View {
-        Menu {
-            if let onSend {
-                Button("发弹幕", systemImage: "text.bubble", action: onSend)
-                    .accessibilityIdentifier("douyin.danmaku.open")
-            }
-            Toggle("显示弹幕", isOn: $enabled)
-                .accessibilityIdentifier("douyin.danmaku.enabled")
-            Picker("弹幕密度", selection: $density) {
-                ForEach(DYDanmakuPolicy.Density.allCases) { option in Text(option.title).tag(option.rawValue) }
-            }
-            .accessibilityIdentifier("douyin.danmaku.density")
-            Toggle("10秒内重复去重", isOn: $deduplicate)
-                .accessibilityIdentifier("douyin.danmaku.deduplicate")
-            Text("显示区域：屏幕上方 1/3")
-        } label: {
-            Label("弹幕 · \((DYDanmakuPolicy.Density(rawValue: density) ?? .standard).title)", systemImage: "text.bubble")
-        }
-        .accessibilityIdentifier("douyin.danmaku.settings")
-        .accessibilityValue("\((DYDanmakuPolicy.Density(rawValue: density) ?? .standard).title)，去重\(deduplicate ? "开启" : "关闭")")
     }
 }
 
@@ -813,7 +783,6 @@ struct DYListPlayer: View {
                                         onLike: { toggleLike(item.id, force: nil) }, onCollect: { toggleCollect(item.id) },
                                         onDoubleTap: { toggleLike(item.id, force: true) },
                                         onComments: { showComments = true },
-                                        onSearch: {},
                                         onAuthor: { onAuthor(item) },
                                         onSavePosition: { resume[item.id] = $0 }, preloader: preloader,
                                         bridge: bridge, onToast: { show($0) }, onBack: { dismiss() })
@@ -1430,6 +1399,7 @@ struct DYAuthorScreen: View {
     private func loadFollow(_ sec: String) async {
         if let s = try? await bridge.followState(sec: sec) {
             followed = s.followed
+            bridge.rememberFollow(author, followed: s.followed)
             if let uid = s.uid, !uid.isEmpty { followUID = uid }
         }
     }
@@ -1475,6 +1445,7 @@ struct DYAuthorScreen: View {
             switch try await bridge.followUser(uid, follow: want) {
             case .ok:
                 followed = want
+                bridge.rememberFollow(author, followed: want)
                 followMsg = nil
             case .notLoggedIn:
                 followMsg = "抖音未登录"
@@ -1541,7 +1512,6 @@ struct DYFollowFeed: View {
                                         collected: collected.contains(item.id) || item.isCollect == 1,
                                         onLike: { like(item.id, force: nil) }, onCollect: { collect(item.id) },
                                         onDoubleTap: { like(item.id, force: true) }, onComments: { onComments(item) },
-                                        onSearch: {},
                                         onAuthor: { onAuthor(item) }, onSavePosition: { resume[item.id] = $0 },
                                         preloader: preloader, bridge: bridge, onToast: onToast,
                                         onNavigateLeft: onShowRecommendations)
