@@ -17,6 +17,7 @@ struct DYVideoOptionsPanel: View {
     @AppStorage("douyin_danmaku_v1") private var danmakuEnabled = true
     @AppStorage(DYDanmakuPolicy.densityKey) private var density = DYDanmakuPolicy.Density.standard.rawValue
     @AppStorage(DYDanmakuPolicy.deduplicateKey) private var deduplicate = true
+    @State private var listAtTop = true
     var onDislike: (() -> Void)?
     var onSendDanmaku: (() -> Void)?
 
@@ -33,9 +34,7 @@ struct DYVideoOptionsPanel: View {
             }
             .padding(.horizontal, 12)
             .contentShape(Rectangle())
-            .gesture(DragGesture().onEnded { value in
-                if value.translation.height > 60 && value.translation.height > abs(value.translation.width) { dismiss() }
-            })
+            .modifier(DYPanelDismissGesture(onClose: { dismiss() }))
             ScrollView {
                 VStack(spacing: 12) {
                     HStack(spacing: 0) {
@@ -134,6 +133,8 @@ struct DYVideoOptionsPanel: View {
                 .padding(.bottom, max(16, DYDuoMetrics.windowBottomInset + 4))
             }
             .scrollBounceBehavior(.basedOnSize)
+            .onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y + $0.contentInsets.top <= 1 } action: { _, atTop in listAtTop = atTop }
+            .modifier(DYPanelDismissGesture(isAtTop: listAtTop, onClose: { dismiss() }))
             .accessibilityIdentifier("douyin.options.list")
         }
         .font(.subheadline)
@@ -142,8 +143,6 @@ struct DYVideoOptionsPanel: View {
         .buttonStyle(.plain)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("douyin.options.panel")
-        .onAppear { DDPlayback.shared.pauseAll(reason: .cover) }
-        .onDisappear { DDPlayback.shared.releaseCover() }
     }
 
     private func shortcut(_ title: String, icon: String, selected: Bool,

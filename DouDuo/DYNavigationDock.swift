@@ -106,6 +106,48 @@ struct DYNativeVideoActions: View {
     }
 }
 
+/// Standalone works have no tab selector. Keep Back separate from the compact
+/// interaction capsule, so the system never turns the video actions into More.
+struct DYStandaloneVideoActions: View {
+    @Environment(\.toolbarVerticalEdge) private var verticalEdge
+    let actions: DYVideoToolbarActions?
+    let onBack: () -> Void
+
+    var body: some View {
+        Color.clear.frame(width: 0, height: 0).allowsHitTesting(false)
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("返回", systemImage: "chevron.backward", action: onBack)
+                        .labelStyle(.iconOnly).foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .accessibilityIdentifier("douyin.list.back")
+                }
+                .axisBehavior(.verticalPreferred)
+                .visibilityPriority(.high)
+                ToolbarItem(placement: .bottomBar) {
+                    if let actions {
+                        VStack(spacing: 4) {
+                            DYAuthorAvatarControl(image: actions.avatarImage, name: actions.authorName,
+                                                  onAuthor: actions.onAuthor, follow: actions.follow)
+                            actions.like
+                            actions.comments
+                            actions.collect
+                            actions.share
+                        }
+                        .padding(.vertical, 5)
+                        .glassEffect(.regular, in: .capsule)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("douyin.video.actions")
+                    }
+                }
+                .sharedBackgroundVisibility(.hidden)
+                .axisBehavior(.verticalPreferred)
+                .visibilityPriority(.high)
+                .hidden(actions == nil || verticalEdge == nil)
+            }
+    }
+}
+
 /// Keep the same avatar footprint before and after following, so changing
 /// relationship state cannot resize the native toolbar or its collapsed tabs.
 struct DYAuthorAvatarControl: View {

@@ -115,7 +115,10 @@ struct PlayerGestureView: UIViewRepresentable {
                 var p = view?.superview
                 while let x = p, !(x is UIScrollView) { p = x.superview }
                 if let sv = p as? UIScrollView { sv.panGestureRecognizer.isEnabled = false; frozenScroll = sv }
-                let fraction = g.location(in: view).x / max(view?.bounds.width ?? 1, 1)
+                // The system status column is part of the screen. Its width must
+                // not shift the 30% / 70% boundaries of the video gestures.
+                let coordinateView: UIView? = view?.window ?? view
+                let fraction = g.location(in: coordinateView).x / max(coordinateView?.bounds.width ?? 1, 1)
                 pressOpensMenu = parent.onContextMenu != nil && (0.3...0.7).contains(fraction)
                 if pressOpensMenu {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()

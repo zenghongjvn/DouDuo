@@ -1219,20 +1219,24 @@ struct DouyinFeedScreen: View {
         nonmutating set { mainTab = newValue ? .mine : .home }
     }
     @State private var authorTarget: DYAweme.Author?
+    @State private var authorWorkOpen = false
     @State private var pendingUpdate: DDUpdate?
     private var showMessages: Bool {
         get { mainTab == .messages }
         nonmutating set { mainTab = newValue ? .messages : .home }
     }
-    /// 盖在视频上的页面（我的/信息/搜索/作者）打开时，所有视频和直播都停
-    private var overlayOpen: Bool { showSearch || showMine || showMessages || authorTarget != nil }
+    /// A side-by-side author pane leaves the current video visible and playing.
+    private var overlayOpen: Bool { showSearch || showMine || showMessages || authorWorkOpen || (authorTarget != nil && !supportsSidePanel) }
     /// 全局播放速度；长按临时倍速不修改持久化偏好。
     @AppStorage("douyin_playback_rate_v1") private var playbackRate = 1.0
     @State private var noticeUnread = 0
     @State private var wideToken = UUID()
     @State private var topChrome = CGRect.zero
     @State private var supportsSidePanel = false
-    private var sidePanelOpen: Bool { supportsSidePanel && (authorTarget != nil || showComments) }
+    @State private var residentComments = false
+    private var liveRoomOpen: Bool { tab == .live && live.entered }
+    private var sidePanelOpen: Bool { residentComments || (supportsSidePanel && (authorTarget != nil || showComments)) }
+    private var hidesVideoChrome: Bool { showComments || residentComments || authorTarget != nil || liveRoomOpen }
     private var headerTopInset: CGFloat {
         // NavigationStack's inset includes a horizontal toolbar after rotation.
         // The fixed video header needs only the physical window's safe area.
@@ -1458,18 +1462,18 @@ struct DouyinFeedScreen: View {
                         .environment(\.duoVisibleVideo, $visibleVideo)
                         .environment(\.duoCleanScreen, cleanScreen)
                         .overlayPreferenceValue(DYActiveVideoActionsKey.self) { actions in
-                            DYNativeVideoActions(actions: showComments || authorTarget != nil ? nil : actions,
+                            DYNativeVideoActions(actions: hidesVideoChrome ? nil : actions,
                                                  isClean: cleanScreen,
                                                  onToggleClean: { cleanScreen.toggle() })
                         }
-                        .toolbarVisibility(.visible, for: .navigationBar)
+                        .toolbarVisibility(liveRoomOpen ? .hidden : .visible, for: .navigationBar)
                         .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
                         .toolbarMinimizationBehavior(.never, for: .navigationBar)
                         .scrollEdgeEffectHidden(true, for: .all)
                         // Hide the underlying native selector for compact
                         // sheets too, so dismissing comments does not restore
                         // a previously expanded tab picker over the video rail.
-                        .modifier(DYSystemTabBar(hidden: showComments || authorTarget != nil || cleanScreen))
+                        .modifier(DYSystemTabBar(hidden: hidesVideoChrome || cleanScreen))
                 }
                 .tint(nil)
             }
@@ -1542,7 +1546,8 @@ struct DouyinFeedScreen: View {
                     if let author = authorTarget {
                         DYAuthorScreen(bridge: bridge, author: author,
                                        onWeb: { web = DYWebTarget(url: $0) },
-                                       onClose: { withAnimation(.snappy) { authorTarget = nil } })
+                                       onClose: { withAnimation(.snappy) { authorTarget = nil } },
+                                       onWorkPresentationChange: { authorWorkOpen = $0 })
                             .padding(.trailing, layout.trailingInset)
                             .id(author.id)
                     } else if let cur = commentAweme {
@@ -1561,6 +1566,7 @@ struct DouyinFeedScreen: View {
             }
         }
         .frame(width: w, height: h, alignment: .topLeading)
+        .onChange(of: layout.resident, initial: true) { _, resident in residentComments = resident }
         .background(theme.media.strongScrim.color(for: scheme).ignoresSafeArea())
         .animation(.snappy, value: layout.resident)
         .animation(.snappy, value: showComments)
@@ -1746,9 +1752,9 @@ struct DouyinFeedScreen: View {
             .padding(.top, headerTopInset)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("douyin.feed.header")
-            .opacity(cleanScreen ? 0 : 1)
-            .allowsHitTesting(!cleanScreen)
-            .accessibilityHidden(cleanScreen)
+            .opacity(cleanScreen || liveRoomOpen ? 0 : 1)
+            .allowsHitTesting(!cleanScreen && !liveRoomOpen)
+            .accessibilityHidden(cleanScreen || liveRoomOpen)
         }
         // The video and bottom chrome reach the physical screen; add the actual
         // home-indicator inset once, inside each page, rather than twice.
@@ -2101,7 +2107,6 @@ struct DYVideoPage: View {
     let onDislike: (() -> Void)?
     /// 播完切下一条（「自动连播」打开才生效）
     var onEnded: (() -> Void)? = nil
-    var onBack: (() -> Void)? = nil
     var onShowFollowing: (() -> Void)? = nil
     var onNavigateLeft: (() -> Void)? = nil
     @State private var authorImage: UIImage?
@@ -2130,7 +2135,7 @@ struct DYVideoPage: View {
          onComments: @escaping () -> Void, onAuthor: @escaping () -> Void, onSavePosition: @escaping (Double) -> Void,
          preloader: DYPreloader, bridge: DouyinBridge? = nil, onToast: ((String) -> Void)? = nil,
          onDislike: (() -> Void)? = nil,
-         onEnded: (() -> Void)? = nil, onBack: (() -> Void)? = nil,
+         onEnded: (() -> Void)? = nil,
          onShowFollowing: (() -> Void)? = nil, onNavigateLeft: (() -> Void)? = nil) {
         self.item = item; self.isCurrent = isCurrent; self.insets = insets; self.resume = resume
         self.liked = liked; self.collected = collected
@@ -2139,7 +2144,6 @@ struct DYVideoPage: View {
         self.preloader = preloader; self.bridge = bridge; self.onToast = onToast
         self.onDislike = onDislike
         self.onEnded = onEnded
-        self.onBack = onBack
         self.onShowFollowing = onShowFollowing
         self.onNavigateLeft = onNavigateLeft
     }
@@ -2410,12 +2414,7 @@ struct DYVideoPage: View {
     /// One set of actions for the current work. Home hosts it above the native
     /// tab selector; standalone work players retain their per-page controls.
     private func actions(_ fg: Color) -> some View {
-        VStack(spacing: 7) {
-            if let onBack {
-                Button("返回", systemImage: "chevron.backward", action: onBack)
-                    .labelStyle(.iconOnly).frame(width: 44, height: 44)
-                    .accessibilityIdentifier("douyin.list.back")
-            }
+        VStack(spacing: 4) {
             authorButton
             railItem(liked ? "heart.fill" : "heart", DYFormat.count(item.stats.digg + (liked ? 1 : 0)),
                      tint: liked ? theme.status.danger.color(for: scheme) : fg, "douyin.like", onLike)
@@ -2478,7 +2477,6 @@ enum DYFormat {
 // MARK: - 评论
 
 struct DYCommentPanel: View {
-    @Environment(\.dySheetDrag) private var sheetDrag
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var scheme
     let bridge: DouyinBridge
@@ -2518,7 +2516,6 @@ struct DYCommentPanel: View {
     @State private var relatedWords: [String] = []
     @State private var relatedQuery: DYRelatedQuery?
     @State private var listAtTop = true
-    @State private var listCanDismiss: Bool?
     @State private var bottomSafeArea = DYDuoMetrics.windowBottomInset
     @FocusState private var inputFocused: Bool
 
@@ -2553,7 +2550,7 @@ struct DYCommentPanel: View {
             .padding(.horizontal, 16)
             .padding(.trailing, trailingInset)
             .contentShape(Rectangle())
-            .simultaneousGesture(closeDrag(fromList: false))
+            .modifier(DYPanelDismissGesture(allowsSwipeRight: true, onClose: onClose))
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("douyin.comments.header")
 
@@ -2611,7 +2608,7 @@ struct DYCommentPanel: View {
             } action: { _, atTop in
                 listAtTop = atTop
             }
-            .simultaneousGesture(closeDrag(fromList: true))
+            .modifier(DYPanelDismissGesture(isAtTop: listAtTop, allowsSwipeRight: true, onClose: onClose))
             .accessibilityIdentifier("douyin.comments.list")
             .onChange(of: highlight) { _, h in
                 guard let h else { return }
@@ -2637,29 +2634,6 @@ struct DYCommentPanel: View {
         .fullScreenCover(item: $relatedQuery) { query in
             DYRelatedSearchScreen(bridge: bridge, word: query.word)
         }
-    }
-
-    /// Only a drag that starts at the top can dismiss; scrolling back up from
-    /// deeper comments must remain a normal list gesture for its whole lifetime.
-    private func closeDrag(fromList: Bool) -> some Gesture {
-        DragGesture(minimumDistance: 10)
-            .onChanged { value in
-                guard onClose != nil else { return }
-                if fromList, listCanDismiss == nil { listCanDismiss = listAtTop }
-                guard !fromList || listCanDismiss == true,
-                      value.translation.height > abs(value.translation.width) else { return }
-                inputFocused = false
-                sheetDrag?.update(value.translation.height)
-            }
-            .onEnded { value in
-                defer { if fromList { listCanDismiss = nil } }
-                guard onClose != nil, !fromList || listCanDismiss == true else { return }
-                let dy = value.translation.height
-                let shouldClose = dy > abs(value.translation.width) &&
-                    (dy > 70 || (dy > 20 && value.predictedEndTranslation.height > 150))
-                if let sheetDrag { sheetDrag.finish(shouldClose) }
-                else if shouldClose { onClose?() }
-            }
     }
 
     private var inputBar: some View {

@@ -145,6 +145,43 @@ extension EnvironmentValues {
     @Entry var dySheetDrag: DYSheetDragActions? = nil
 }
 
+/// Shared dismissal arbitration. A vertical scroll that began below the top
+/// never becomes a dismissal; a horizontal gesture can close from any row.
+struct DYPanelDismissGesture: ViewModifier {
+    @Environment(\.dySheetDrag) private var sheetDrag
+    var isAtTop = true
+    var allowsSwipeRight = false
+    var onClose: (() -> Void)?
+    @State private var direction: Axis?
+    @State private var startedAtTop = false
+
+    func body(content: Content) -> some View {
+        content.simultaneousGesture(DragGesture(minimumDistance: 10, coordinateSpace: .global)
+            .onChanged { value in
+                guard onClose != nil else { return }
+                if direction == nil {
+                    startedAtTop = isAtTop
+                    direction = abs(value.translation.width) > abs(value.translation.height) ? .horizontal : .vertical
+                }
+                if direction == .vertical, startedAtTop,
+                   value.translation.height > abs(value.translation.width) {
+                    sheetDrag?.update(value.translation.height)
+                }
+            }
+            .onEnded { value in
+                defer { direction = nil }
+                guard let onClose else { return }
+                let dx = value.translation.width, dy = value.translation.height
+                let right = allowsSwipeRight && direction == .horizontal && dx > abs(dy) * 1.2 &&
+                    (dx > 70 || (dx > 25 && value.predictedEndTranslation.width > 160))
+                let down = direction == .vertical && startedAtTop && dy > abs(dx) * 1.2 &&
+                    (dy > 70 || (dy > 20 && value.predictedEndTranslation.height > 150))
+                if right || down { onClose() }
+                else { sheetDrag?.finish(false) }
+            })
+    }
+}
+
 extension View {
     func dyBottomSheet<Panel: View>(isPresented: Binding<Bool>, kind: DYBottomSheetKind,
                                    @ViewBuilder content: @escaping () -> Panel) -> some View {
@@ -284,6 +321,7 @@ struct DYCommentPlayerLayout<Video: View>: View {
     let aweme: DYAweme?
     @Binding var showComments: Bool
     var focus: DYCommentFocus? = nil
+    var onBack: () -> Void
     @ViewBuilder var video: (EdgeInsets) -> Video
 
     var body: some View {
@@ -310,8 +348,12 @@ struct DYCommentPlayerLayout<Video: View>: View {
                 }
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
                 .background(Color.black.ignoresSafeArea())
-                .toolbarVisibility(showComments || layout.showsPane ? .hidden : .automatic, for: .tabBar)
-                .toolbarVisibility(layout.showsPane ? .visible : .hidden, for: .navigationBar)
+                .overlayPreferenceValue(DYActiveVideoActionsKey.self) { actions in
+                    DYStandaloneVideoActions(actions: showComments || layout.showsPane ? nil : actions, onBack: onBack)
+                }
+                .toolbarVisibility(.hidden, for: .tabBar)
+                .toolbarVisibility(.visible, for: .navigationBar)
+                .toolbarVerticalCompressionBehavior(.prefersToolbarItems)
                 .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
                 .animation(.snappy, value: showComments)
                 .animation(.snappy, value: layout.resident)

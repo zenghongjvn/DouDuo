@@ -772,7 +772,7 @@ struct DYListPlayer: View {
     private var current: DYAweme? { items.first { $0.id == currentID } }
 
     var body: some View {
-        DYCommentPlayerLayout(bridge: bridge, aweme: current, showComments: $showComments, focus: commentFocus) { insets in
+        DYCommentPlayerLayout(bridge: bridge, aweme: current, showComments: $showComments, focus: commentFocus, onBack: { dismiss() }) { insets in
             ZStack(alignment: .topLeading) {
                 Color.black.ignoresSafeArea()
                 ScrollView(.vertical) {
@@ -785,7 +785,7 @@ struct DYListPlayer: View {
                                         onComments: { showComments = true },
                                         onAuthor: { onAuthor(item) },
                                         onSavePosition: { resume[item.id] = $0 }, preloader: preloader,
-                                        bridge: bridge, onToast: { show($0) }, onBack: { dismiss() })
+                                        bridge: bridge, onToast: { show($0) })
                                 .containerRelativeFrame([.horizontal, .vertical])
                                 .id(item.id)
                         }
@@ -811,7 +811,8 @@ struct DYListPlayer: View {
         .accessibilityIdentifier("douyin.list.player")
         // Full-screen works own their chrome; do not inherit the author split
         // pane's hidden rail or the home page's pinned header.
-        .environment(\.duoSystemBars, false)
+        .environment(\.duoSystemBars, true)
+        .environment(\.duoCleanScreen, false)
         .environment(\.duoInlineVideoNavigation, false)
         .onChange(of: currentID) { old, new in
             if new == nil, let old { currentID = old; return }
@@ -1292,6 +1293,7 @@ struct DYAuthorScreen: View {
     let author: DYAweme.Author
     let onWeb: (URL) -> Void
     var onClose: (() -> Void)? = nil
+    var onWorkPresentationChange: ((Bool) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var user: DYUser?
     @State private var err: String?
@@ -1331,6 +1333,7 @@ struct DYAuthorScreen: View {
                 Text(followMsg).font(.caption2).foregroundStyle(.orange)
             }
             DYGrid(items: posts, hasMore: hasMore, loading: loading, error: postErr, onLoadMore: { requestMore() }, onOpen: { i in
+                onWorkPresentationChange?(true)
                 player = DYAuthorPlay(index: i)
             })
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1354,7 +1357,7 @@ struct DYAuthorScreen: View {
             ToolbarItem(placement: .primaryAction) { followButton }
                 .axisBehavior(.verticalPreferred)
         }
-        .fullScreenCover(item: $player) { p in
+        .fullScreenCover(item: $player, onDismiss: { onWorkPresentationChange?(false) }) { p in
             DYListPlayer(bridge: bridge, title: author.name.isEmpty ? "作品" : author.name, items: posts, start: p.index,
                          loadMore: { await loadPosts() }, onAuthor: { _ in })
         }

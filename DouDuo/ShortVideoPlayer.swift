@@ -307,7 +307,7 @@ struct PlayerPage: View {
                 DYDanmakuLayer(items: danmaku, clock: dmClock, topInset: topInset)
             }
             // 手势层铺满整页（含视频上下黑边）：横滑快进 / 单击 / 双击 / 长按，竖滑漏给分页
-            if player != nil || vlc != nil { gestures.padding(chromeInsets) }
+            if player != nil || vlc != nil { gestures }
             #if DEBUG
             Text(String(format: "%.2f", videoScale)).font(.caption2).opacity(0.01)
                 .accessibilityIdentifier("douyin.video.zoom")

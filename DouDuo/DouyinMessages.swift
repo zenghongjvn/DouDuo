@@ -1860,11 +1860,6 @@ struct DYForwardScreen: View {
         .sheet(isPresented: $showLogin, onDismiss: { Task { await restorePeople() } }) { DYForwardOfficialScreen(item: item) }
         .sheet(isPresented: $showOtherApps) { DYForwardSystemShare(url: item.webURL) }
         .task { await restorePeople() }
-        .onAppear { DDPlayback.shared.pauseAll(reason: .cover) }
-        .onDisappear {
-            // 缓存模型持有同一个只读官网上下文；下次打开无需重建SDK/重新拉整份朋友。
-            DDPlayback.shared.releaseCover()
-        }
     }
     private func restorePeople() async {
         if model.layoutFixture { accountPrepared = true; return }

@@ -13,6 +13,115 @@ final class DouDuoUITests: XCTestCase {
         }
     }
 
+    func testPanelsKeepPlaybackAndDismissGestures() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += ["-douyin_muted_v1", "YES", "-douyin_autoplay_v1", "NO"]
+        app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
+        app.launchEnvironment["DOUDUO_FORWARD_LAYOUT_FIXTURE"] = "1"
+        app.launchEnvironment["DOUDUO_AUTHOR_WORK_FIXTURE"] = "1"
+        addTeardownBlock { app.terminate() }
+        app.launch()
+        XCTAssertTrue(wait(label: "7678628867820506406", on: app.staticTexts["douyin.currentID"], timeout: 60))
+        let progress = app.descendants(matching: .any).matching(identifier: "douyin.progress").firstMatch
+        XCTAssertTrue(progress.waitForExistence(timeout: 15))
+        func seconds() -> Int { Int((progress.value as? String ?? "0").split(separator: " ").first ?? "0") ?? 0 }
+        let started = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in seconds() > 2 }, object: app)
+        XCTAssertEqual(XCTWaiter.wait(for: [started], timeout: 20), .completed)
+        let beforeMenu = seconds()
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.68, dy: 0.40)).press(forDuration: 0.8)
+        let options = app.buttons["douyin.options.close"].firstMatch
+        XCTAssertTrue(options.waitForExistence(timeout: 5), "68% 按整个屏幕计算，仍属于菜单区")
+        Thread.sleep(forTimeInterval: 4)
+        let list = app.scrollViews["douyin.options.list"].firstMatch
+        let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 180)))
+        XCTAssertTrue(options.waitForNonExistence(timeout: 5))
+        XCTAssertGreaterThan(seconds(), beforeMenu + 2, "长按菜单保持视频播放")
+        let beforeShare = seconds()
+        app.buttons["douyin.share"].firstMatch.tap()
+        let closeShare = app.buttons["douyin.forward.close"].firstMatch
+        XCTAssertTrue(closeShare.waitForExistence(timeout: 10))
+        Thread.sleep(forTimeInterval: 4)
+        closeShare.tap()
+        XCTAssertTrue(closeShare.waitForNonExistence(timeout: 5))
+        XCTAssertGreaterThan(seconds(), beforeShare + 2, "分享弹窗保持视频播放")
+        app.buttons["douyin.comments"].firstMatch.tap()
+        let comments = app.scrollViews["douyin.comments.list"].firstMatch
+        XCTAssertTrue(comments.waitForExistence(timeout: 15))
+        comments.swipeUp()
+        let right = comments.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.45))
+        right.press(forDuration: 0.05, thenDragTo: right.withOffset(CGVector(dx: 180, dy: 3)))
+        XCTAssertTrue(app.buttons["douyin.comments.close"].firstMatch.waitForNonExistence(timeout: 5), "列表滚动后仍可右滑关闭")
+        XCTAssertTrue(app.buttons["douyin.share"].firstMatch.waitForExistence(timeout: 5))
+        if app.windows.firstMatch.frame.width >= 700 {
+            let beforeAuthor = seconds()
+            app.buttons["douyin.author.avatar"].firstMatch.tap()
+            let back = app.buttons["douyin.author.back"].firstMatch
+            XCTAssertTrue(back.waitForExistence(timeout: 15))
+            Thread.sleep(forTimeInterval: 4)
+            XCTAssertGreaterThan(seconds(), beforeAuthor + 2, "并排作者页保持视频播放")
+            let work = app.descendants(matching: .any).matching(identifier: "douyin.author.works").firstMatch.buttons.firstMatch
+            XCTAssertTrue(work.waitForExistence(timeout: 30))
+            work.tap()
+            let workBack = app.buttons["douyin.list.back"].firstMatch
+            XCTAssertTrue(workBack.waitForExistence(timeout: 10))
+            XCTAssertTrue(app.buttons["douyin.share"].firstMatch.isHittable)
+            workBack.tap()
+            XCTAssertTrue(back.waitForExistence(timeout: 10))
+            let resumedAt = seconds()
+            Thread.sleep(forTimeInterval: 3)
+            XCTAssertGreaterThan(seconds(), resumedAt, "退出作者作品后左侧视频恢复")
+            back.tap()
+        }
+        attach(app, "panels-playback-and-dismissal")
+    }
+
+    func testStandaloneRailWithLiveActivity() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += ["-douyin_muted_v1", "YES", "-douyin_autoplay_v1", "NO"]
+        app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
+        app.launchEnvironment["DOUDUO_COMMENT_ENTRY"] = "mine"
+        addTeardownBlock { app.terminate() }
+        app.launch()
+        XCTAssertTrue(wait(label: "7678628867820506406", on: app.staticTexts["douyin.currentID"], timeout: 60))
+        app.buttons["首页"].firstMatch.tap()
+        app.buttons["我的"].firstMatch.tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "douyin.list.player").firstMatch.waitForExistence(timeout: 30))
+        let rail = app.descendants(matching: .any).matching(identifier: "douyin.video.actions").firstMatch
+        XCTAssertTrue(rail.waitForExistence(timeout: 10))
+        XCTAssertLessThan(rail.frame.height, 320, "作品互动胶囊应紧凑，不占满系统状态列")
+        for id in ["douyin.author.avatar", "douyin.like", "douyin.comments", "douyin.collect", "douyin.share", "douyin.list.back"] {
+            XCTAssertTrue(app.buttons[id].firstMatch.isHittable, id + " 应直接显示，不进入更多")
+        }
+        XCTAssertFalse(app.buttons["douyin.more"].exists)
+        XCTAssertFalse(app.buttons["更多"].exists)
+        attach(app, "standalone-rail-live-activity")
+        app.buttons["douyin.comments"].firstMatch.tap()
+        let list = app.scrollViews["douyin.comments.list"].firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 10))
+        let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.4))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 180, dy: 0)))
+        XCTAssertTrue(app.buttons["douyin.comments.close"].firstMatch.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["douyin.share"].firstMatch.isHittable)
+    }
+
+    func testPhysicalHalfFoldCommentsHideSidebar() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments += ["-douyin_muted_v1", "YES", "-douyin_autoplay_v1", "NO"]
+        app.launchEnvironment["DOUDUO_VIDEO_ID"] = "7678628867820506406"
+        addTeardownBlock { app.terminate() }
+        app.launch()
+        XCTAssertTrue(wait(label: "7678628867820506406", on: app.staticTexts["douyin.currentID"], timeout: 60))
+        XCTAssertTrue(app.scrollViews["douyin.comments.list"].firstMatch.waitForExistence(timeout: 15), "实际半折自动显示评论")
+        for id in ["douyin.like", "douyin.share", "douyin.cleanScreen", "首页"] {
+            XCTAssertFalse(app.buttons[id].firstMatch.isHittable, id + " 半折评论时隐藏")
+        }
+        attach(app, "physical-half-fold-comments")
+    }
+
     func testCleanScreenRestoresStableSidebar() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -159,7 +268,7 @@ final class DouDuoUITests: XCTestCase {
         let comments = app.buttons["douyin.comments"].firstMatch
         comments.tap()
         let header = app.otherElements["douyin.comments.header"].firstMatch
-        let panel = app.otherElements["douyin.comments.panel"].firstMatch
+        let panel = app.descendants(matching: .any).matching(identifier: "douyin.sheet.edgeSurface").firstMatch
         XCTAssertTrue(header.waitForExistence(timeout: 10))
         XCTAssertEqual(header.frame.minY, panel.frame.minY, accuracy: 1, "顶部不保留横条占位")
         let related = app.scrollViews["douyin.comments.relatedSearch"].firstMatch
@@ -554,6 +663,10 @@ final class DouDuoUITests: XCTestCase {
         let back = app.buttons["live.room.close"]
         XCTAssertTrue(back.waitForExistence(timeout: 5))
         XCTAssertTrue(back.label.contains("返回"))
+        XCTAssertFalse(app.buttons["douyin.search"].isHittable)
+        XCTAssertFalse(app.buttons["douyin.more"].isHittable)
+        XCTAssertFalse(app.buttons["首页"].isHittable)
+        XCTAssertFalse(app.buttons["douyin.cleanScreen"].isHittable)
         back.tap()
         XCTAssertTrue(discover.waitForExistence(timeout: 5))
         XCTAssertEqual(app.state, .runningForeground)
@@ -763,7 +876,7 @@ final class DouDuoUITests: XCTestCase {
         let close = app.buttons["douyin.comments.close"].firstMatch
         XCTAssertTrue(close.waitForExistence(timeout: 10))
         let info = app.otherElements["douyin.video.info"].firstMatch
-        let panel = app.otherElements["douyin.comments.panel"].firstMatch
+        let panel = app.descendants(matching: .any).matching(identifier: "douyin.comments.panel").firstMatch
         XCTAssertLessThanOrEqual(info.frame.maxX, panel.frame.minX, "视频留在左侧，评论在右侧")
         XCTAssertGreaterThan(panel.frame.width, app.windows.firstMatch.frame.width * 0.40)
         XCTAssertLessThan(panel.frame.width, app.windows.firstMatch.frame.width * 0.52)
@@ -963,7 +1076,7 @@ final class DouDuoUITests: XCTestCase {
         visibleButton("douyin.comments").tap()
         let close = app.buttons["douyin.comments.close"].firstMatch
         XCTAssertTrue(close.waitForExistence(timeout: 15))
-        let panel = app.otherElements["douyin.comments.panel"].firstMatch
+        let panel = app.descendants(matching: .any).matching(identifier: "douyin.comments.panel").firstMatch
         let commentHeader = app.otherElements["douyin.comments.header"].firstMatch
         XCTAssertLessThanOrEqual(commentHeader.frame.height, 44)
         let related = app.scrollViews["douyin.comments.relatedSearch"].firstMatch
@@ -1017,7 +1130,7 @@ final class DouDuoUITests: XCTestCase {
             let comment = app.buttons["douyin.comments"].firstMatch
             XCTAssertTrue(comment.waitForExistence(timeout: 40))
             comment.tap()
-            let panel = app.otherElements["douyin.comments.panel"].firstMatch
+            let panel = app.descendants(matching: .any).matching(identifier: "douyin.comments.panel").firstMatch
             XCTAssertTrue(panel.waitForExistence(timeout: 15))
             let header = app.otherElements["douyin.comments.header"].firstMatch
             XCTAssertLessThanOrEqual(header.frame.height, 44)
