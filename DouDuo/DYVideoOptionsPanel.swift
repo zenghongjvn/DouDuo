@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Shared by recommendation, following and every works player. These are the
 /// existing persisted preferences; moving their controls does not reset them.
+@available(iOS 27.1, *)
 struct DYVideoOptionsPanel: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme

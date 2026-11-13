@@ -1122,6 +1122,8 @@ struct FlowLayout: Layout {
 // MARK: - 我的
 
 struct DYMineScreen: View {
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage(DDChromeMode.key) private var chromeModeRaw = DDChromeMode.classic.rawValue
     let bridge: DouyinBridge
     let onLogin: () -> Void
     let onAuthor: (DYAweme) -> Void
@@ -1140,6 +1142,9 @@ struct DYMineScreen: View {
                 .navigationTitle(user?.name ?? "我的")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
+                    if chromeModeRaw != DDChromeMode.duoClassic.rawValue {
+                        ToolbarItem(placement: .navigation) { Button("返回", systemImage: "chevron.backward") { dismiss() } }
+                    }
                     ToolbarItem(placement: .primaryAction) {
                         Button("网页版 / 登录", systemImage: "safari") { onLogin() }
                     }
@@ -1345,17 +1350,17 @@ struct DYAuthorScreen: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("douyin.author.panel")
         .navigationBarBackButtonHidden()
-        .toolbarVisibility(.hidden, for: .tabBar)
-        .toolbarVisibility(.visible, for: .navigationBar)
-        .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
+        .toolbar(.hidden, for: .tabBar)
+        .toolbar(.visible, for: .navigationBar)
+        .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button("返回", systemImage: "chevron.backward", action: close)
                     .accessibilityIdentifier("douyin.author.back")
             }
-            .axisBehavior(.verticalPreferred)
+            .dyVerticalPreferred()
             ToolbarItem(placement: .primaryAction) { followButton }
-                .axisBehavior(.verticalPreferred)
+                .dyVerticalPreferred()
         }
         .fullScreenCover(item: $player, onDismiss: { onWorkPresentationChange?(false) }) { p in
             DYListPlayer(bridge: bridge, title: author.name.isEmpty ? "作品" : author.name, items: posts, start: p.index,
@@ -1633,3 +1638,40 @@ final class DYPagedModelHolder: ObservableObject {
     }
 }
 #endif
+
+
+extension ToolbarContent {
+    @ToolbarContentBuilder func dyVerticalPreferred() -> some ToolbarContent {
+        if #available(iOS 27.1, *) { self.axisBehavior(.verticalPreferred) }
+        else { self }
+    }
+}
+
+struct DYDanmakuOptions: View {
+    var onSend: (() -> Void)? = nil
+    @AppStorage("douyin_danmaku_v1") private var enabled = true
+    @AppStorage(DYDanmakuPolicy.densityKey) private var density = DYDanmakuPolicy.Density.standard.rawValue
+    @AppStorage(DYDanmakuPolicy.deduplicateKey) private var deduplicate = true
+
+    var body: some View {
+        Menu {
+            if let onSend {
+                Button("发弹幕", systemImage: "text.bubble", action: onSend)
+                    .accessibilityIdentifier("douyin.danmaku.open")
+            }
+            Toggle("显示弹幕", isOn: $enabled)
+                .accessibilityIdentifier("douyin.danmaku.enabled")
+            Picker("弹幕密度", selection: $density) {
+                ForEach(DYDanmakuPolicy.Density.allCases) { option in Text(option.title).tag(option.rawValue) }
+            }
+            .accessibilityIdentifier("douyin.danmaku.density")
+            Toggle("10秒内重复去重", isOn: $deduplicate)
+                .accessibilityIdentifier("douyin.danmaku.deduplicate")
+            Text("显示区域：屏幕上方 1/3")
+        } label: {
+            Label("弹幕 · \((DYDanmakuPolicy.Density(rawValue: density) ?? .standard).title)", systemImage: "text.bubble")
+        }
+        .accessibilityIdentifier("douyin.danmaku.settings")
+        .accessibilityValue("\((DYDanmakuPolicy.Density(rawValue: density) ?? .standard).title)，去重\(deduplicate ? "开启" : "关闭")")
+    }
+}

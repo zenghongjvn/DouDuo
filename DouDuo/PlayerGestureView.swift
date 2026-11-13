@@ -95,10 +95,16 @@ struct PlayerGestureView: UIViewRepresentable {
         private var pressStartY: CGFloat = 0
         private var pressLocked = false
         private var pressOpensMenu = false
+        private var lastLongEnd = Date.distantPast
+        private var longActive = false
         private weak var frozenScroll: UIScrollView?
         init(_ p: PlayerGestureView) { parent = p }
 
-        @objc func handleSingle(_ g: UITapGestureRecognizer) { parent.onSingleTap() }
+        @objc func handleSingle(_ g: UITapGestureRecognizer) {
+            // UIKit may deliver a tap when a recognized hold ends.
+            if longActive || Date().timeIntervalSince(lastLongEnd) < 0.8 { return }
+            parent.onSingleTap()
+        }
 
         @objc func handleDouble(_ g: UITapGestureRecognizer) {
             guard let v = view else { return }
@@ -109,6 +115,7 @@ struct PlayerGestureView: UIViewRepresentable {
             switch g.state {
             case .began:
                 // Only a recognized hold may turn into the lock/unlock drag.
+                longActive = true
                 g.allowableMovement = .greatestFiniteMagnitude
                 pressStartY = g.location(in: view).y; pressLocked = false
                 // 长按期间下滑不能触发外层切视频：先把外层 ScrollView 的滑动关掉，松手再恢复
@@ -141,6 +148,8 @@ struct PlayerGestureView: UIViewRepresentable {
                 g.allowableMovement = 12
                 frozenScroll?.panGestureRecognizer.isEnabled = true; frozenScroll = nil
                 pressLocked = false
+                if longActive { lastLongEnd = Date() }
+                longActive = false
                 if !pressOpensMenu { parent.onLongPress(false) }
                 pressOpensMenu = false
             default: break

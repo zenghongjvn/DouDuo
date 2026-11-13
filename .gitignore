@@ -5,9 +5,13 @@ DerivedData/
 xcuserdata/
 .DS_Store
 Vendor/VLCKit/VLCKit-all.xcframework/
-Vendor/VLCKit/VLCKit-all.xcframework
-output/
 Vendor/VLCKit/*.zip
 release.local.sh
 att*/
 *.xcresult/
+
+# Local binary dependency may be a symlink during development.
+Vendor/VLCKit/VLCKit-all.xcframework
+
+# Local Python test bytecode.
+__pycache__/

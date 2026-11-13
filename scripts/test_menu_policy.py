@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Execute the real Swift feed policy in isolation.
-
-Native menu layout and gestures are covered by DouDuoUITests.
+"""Read-only menu checks + execute the real Swift feed policy in isolation.
 
 No network, UIKit, simulator, account writes or send callbacks are executed.
 SwiftUI wrappers and DYAweme below are test adapters, not API responses.
 """
 from pathlib import Path
-import os
 import re
 import subprocess
 import tempfile
@@ -15,6 +12,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 FEED = (ROOT / "DouDuo/DouyinFeedView.swift").read_text()
+UPSTREAM_ROOT = FEED[FEED.index("struct DYUpstreamFeedScreen:"):FEED.index("enum DDChromeMode:")]
+UPSTREAM_PAGE = FEED[FEED.index("struct DYUpstreamVideoPage:"):FEED.index("struct DYClassicVideoPage:")]
+EXTRAS = (ROOT / "DouDuo/DouyinExtras.swift").read_text()
 
 
 def block(source, marker):
@@ -28,11 +28,143 @@ def block(source, marker):
     return source[start:end]
 
 
+def menu_content(source, title):
+    for match in re.finditer(r"\bMenu \{", source):
+        candidate = block(source[match.start():], "Menu")
+        tail = source[match.start() + len(candidate):]
+        if re.match(r'\s*label:\s*\{\s*Label\("' + re.escape(title) + r'",', tail):
+            return candidate
+    raise AssertionError("Menu not found: " + title)
+
+
 class MenuPolicyTests(unittest.TestCase):
     def test_legacy_direction_state_removed(self):
         for token in ("douyin_portrait_ratio_v1", "douyin_portrait_only_v2",
                       "portraitRatio", "mixLabel", "竖屏占比", "douyin.mix"):
             self.assertNotIn(token, FEED)
+
+    def test_live_module_menu_actions_follow_the_selected_module(self):
+        menu = block(FEED, "private func minimalModuleButton")
+        live = menu.split("if tab == .live", 1)[1]
+        self.assertLess(live.index("我的关注"), live.index('minimalMenuRow("搜索"'))
+        self.assertLess(live.index("发现更多"), live.index('minimalMenuRow("搜索"'))
+        self.assertIn("douyin.module.live.follow", live)
+        self.assertIn("douyin.module.live.discover", live)
+        self.assertIn("queueLiveModule(.followedLive)", live)
+        self.assertIn("queueLiveModule(.discover)", live)
+        after_live = live.split('minimalMenuRow("搜索"', 1)[1]
+        self.assertNotIn("我的关注", after_live)
+        self.assertNotIn("发现更多", after_live)
+        self.assertIn("publishQueuedLiveModule()", menu)
+        self.assertNotIn("NotificationCenter", menu)
+        room = (ROOT / "DouDuo/DouyinLiveRoom.swift").read_text()
+        preview = room.split("if !model.entered", 1)[1].split("if placement.role", 1)[0]
+        self.assertIn("previewChrome(in: geo, pane: shown.interaction)", preview)
+        self.assertNotIn("DYRailReservedNudge", preview)
+        chrome = block(room, "private func previewChrome")
+        self.assertIn("containedInsets", chrome)
+        self.assertIn("avatarStripInsets", chrome)
+        self.assertIn("case .followedLive:", room)
+        self.assertNotIn("case .followed:", room)
+        followed = room.split("case .followedLive:", 1)[1].split("case .discover:", 1)[0]
+        self.assertIn("followStripExpanded = true", followed)
+        self.assertNotIn("showFollowLive = true", followed)
+        self.assertIn("showDiscover = false", followed)
+        discover = room.split("case .discover:", 1)[1].split(".onChange(of: classicPreviewChrome)", 1)[0]
+        self.assertIn("followStripExpanded = false", discover)
+        self.assertIn("showDiscover = true", discover)
+        self.assertIn("live.follow.strip.close", room)
+        self.assertIn("DYFollowLiveSheet(bridge: bridge)", room)
+        self.assertIn("DYRailReservedNudge()", room.split("private struct DYLiveRoomPage", 1)[1])
+        self.assertIn("if classicPreviewChrome", preview)
+        self.assertIn("discoverBar", preview)
+        self.assertIn("followStrip", preview)
+        self.assertLess(preview.index("railFollowDismiss"), preview.index("followStrip(scrollTail:"))
+        strip = preview.split("followStrip(scrollTail:", 1)[1]
+        self.assertLess(strip.index(".padding(.top, 10)"), strip.index("if showDiscover"))
+        dismiss = block(room, "private var railFollowDismiss")
+        self.assertIn("DYLivePreviewChrome.minTapHeight", dismiss)
+        self.assertNotIn("ddGlassCapsule", dismiss)
+        self.assertNotIn("discoverBar", preview.split("} else if followStripExpanded", 1)[1].split("if followStripExpanded", 1)[0])
+        self.assertIn("classicPreviewChrome: !chromeMode.usesRail", FEED)
+        panel = block(room, "private var discoverPanel")
+        self.assertIn("live.discover.close", panel)
+        self.assertIn("!classicPreviewChrome", panel)
+        self.assertNotIn("发现更多", panel)
+        pick = block(room, "private func pickCategory")
+        self.assertIn("if !classicPreviewChrome", pick)
+        self.assertIn("showDiscover = false", pick)
+        self.assertIn("func dismissPreviewOverlays()", room)
+
+    def test_top_bar_icons_and_hit_targets(self):
+        top = block(UPSTREAM_ROOT, "private func topBarRow")
+        self.assertIn("ForEach(DYTab.allCases", top)
+        tabs = block(FEED, "enum DYTab:")
+        for title in ("关注", "推荐", "直播"):
+            self.assertIn('"' + title + '"', tabs)
+        self.assertNotIn('Text("信息")', top)
+        self.assertNotIn("myUser?.name", top)
+        self.assertNotIn("showName", top)
+        self.assertIn('Image(systemName: "bubble.left.and.bubble.right")', top)
+        self.assertIn("noticeUnread > 0", top)
+        self.assertIn("theme.status.danger", top)
+        self.assertEqual(top.count(".frame(minWidth: 44, minHeight: 44)"), 2)
+
+    def test_current_item_menu(self):
+        menu = block(UPSTREAM_PAGE, "private func moreMenu")
+        quick = block(menu, "ControlGroup")
+        self.assertIn("DYForwardMenu(item: item, bridge: bridge, foreground: fg)", quick)
+        self.assertIn('"下载"', quick)
+        self.assertNotIn("ShareLink", menu)
+        self.assertNotIn("danmaku", quick.lower())
+        self.assertLess(menu.index('"不感兴趣"'), menu.index("DYDanmakuOptions"))
+        self.assertLess(menu.index("DYDanmakuOptions"), menu.index("moreExtras"))
+        self.assertIn("onSend: bridge == nil ? nil", menu)
+        self.assertIn("showDanmakuInput = true", menu)
+        self.assertIn("danmakuFocused = true", menu)
+
+    def test_danmaku_single_entry_and_defaults(self):
+        options = block(EXTRAS, "struct DYDanmakuOptions:")
+        for token in ('Label("弹幕', 'Button("发弹幕",', 'Toggle("显示弹幕",',
+                      'Picker("弹幕密度",', 'Toggle("10秒内重复去重",',
+                      'private var deduplicate = true', 'Density.standard.rawValue'):
+            self.assertIn(token, options)
+        self.assertIn("if let onSend", options)
+        self.assertNotIn("弹幕设置 ·", options)
+
+    def test_settings_paths_and_duration_preferences(self):
+        menu = block(UPSTREAM_ROOT, "private func moreExtrasMenu")
+        settings = menu_content(menu, "设置")
+        playback = menu_content(settings, "播放设置")
+        # 2026-11-12 老板定：倍速/自动连播放「更多」第一层，铺满放右侧按钮栏，设置·播放设置里不再重复
+        self.assertIn("$muted", playback)
+        self.assertEqual(menu.count("$muted"), 1)
+        for gone in ("$autoNext", "$feed.autoFit", "播放速度"):
+            self.assertNotIn(gone, playback)
+            self.assertNotIn(gone, menu)
+        self.assertIn('Label("播放设置",', settings)
+        for title in ("内容偏好", "高级筛选", "缓存管理", "账号与登录", "关于", "开源仓库"):
+            self.assertIn('Label("' + title + '"', settings)
+        for token in ("$feed.shortRatioPortrait", "$feed.shortRatioLandscape",
+                      "$feed.landscapeWhenWide", "$cacheCount", "DYVideoCache.shared.clear()",
+                      "DouyinWeb.home", "DDUpdateChecker.repoURL"):
+            self.assertIn(token, settings)
+        content = menu_content(settings, "内容偏好")
+        advanced = menu_content(content, "高级筛选")
+        self.assertIn("$feed.landscapeWhenWide", content)
+        for token in ("$feed.shortRatioPortrait", "$feed.shortRatioLandscape"):
+            self.assertIn(token, advanced)
+            self.assertNotIn(token, playback)
+        cache = menu_content(settings, "缓存管理")
+        self.assertIn("$cacheCount", cache)
+        self.assertIn("DYVideoCache.shared.clear()", cache)
+        self.assertIn("DouyinWeb.home", menu_content(settings, "账号与登录"))
+        self.assertIn("DDUpdateChecker.repoURL", menu_content(settings, "关于"))
+        self.assertIn('"刷新推荐"', menu[:menu.index('            Menu {')])
+        self.assertNotIn("@State", menu)
+        load = block(FEED, "func loadMore(_ bridge:")
+        self.assertIn("if added == 0, let r = targetRatio, r > 0, r < 1", load)
+        self.assertIn("fill(want, relaxed: true)", load)
 
     def test_execute_extracted_swift_model(self):
         # Compile production properties + policy/fill/pick/remix/trim, excluding all network code.
@@ -126,7 +258,7 @@ precondition(remix.pool.map(\.id) == ["upcoming-tall"])
 precondition(DYFeedModel.isPortrait(DYAweme(id: "gallery", images: ["fixture"])))
 print("PASS \(scenarios) legacy/orientation combinations; scarcity fallback; strict wide override; independent durations; remix; gallery classification")
 '''
-        scratch = Path(os.environ.get("TMPDIR", Path.home() / ".hermes/profiles/shayu/cache/scratch"))
+        scratch = Path(tempfile.gettempdir())
         scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="menu-policy-", dir=scratch) as folder:
             source = Path(folder) / "Policy.swift"

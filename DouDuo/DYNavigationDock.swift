@@ -9,13 +9,14 @@ enum DYMainTab: String, CaseIterable, Hashable {
 /// column runs out of room. The expanded selector remains a native TabView.
 struct DYSystemTabBar: ViewModifier {
     var hidden = false
-
-    func body(content: Content) -> some View {
-        content
-            .toolbarVisibility(hidden ? .hidden : .visible, for: .tabBar)
-            .toolbarVerticalCompressionBehavior(.prefersToolbarItems)
-            .toolbarBackgroundVisibility(.hidden, for: .bottomBar)
-            .tabBarMinimizeBehavior(.never)
+    @AppStorage(DDChromeMode.key) private var mode = DDChromeMode.classic.rawValue
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(iOS 27.1, *), mode == DDChromeMode.duoClassic.rawValue {
+            content.toolbarVisibility(hidden ? .hidden : .visible, for: .tabBar)
+                .toolbarVerticalCompressionBehavior(.prefersToolbarItems)
+                .toolbarBackgroundVisibility(.hidden, for: .bottomBar)
+                .tabBarMinimizeBehavior(.never)
+        } else { content }
     }
 }
 
@@ -40,6 +41,7 @@ struct DYVideoToolbarActions {
     let share: AnyView
 }
 
+@available(iOS 27.1, *)
 struct DYNativeVideoActions: View {
     @Environment(\.toolbarVerticalEdge) private var verticalEdge
     let actions: DYVideoToolbarActions?
@@ -108,6 +110,7 @@ struct DYNativeVideoActions: View {
 
 /// Standalone works have no tab selector. Keep Back separate from the compact
 /// interaction capsule, so the system never turns the video actions into More.
+@available(iOS 27.1, *)
 struct DYStandaloneVideoActions: View {
     @Environment(\.toolbarVerticalEdge) private var verticalEdge
     let actions: DYVideoToolbarActions?
@@ -230,5 +233,30 @@ private struct DYToolbarFrameReader: UIViewRepresentable {
         weak var view: FrameView?
         init(view: FrameView) { self.view = view }
         @objc func sample() { view?.reportFrame() }
+    }
+}
+
+/// Shared author status mark. Classic hides followed badges at its call site.
+struct DYAuthorFollowMark: View {
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var scheme
+    let followed: Bool
+    var busy = false
+    var diameter: CGFloat = 14
+    var symbolSize: CGFloat = 8
+    var body: some View {
+        ZStack {
+            Circle().fill(followed ? theme.status.success.color(for: scheme) : theme.status.danger.color(for: scheme))
+            if !busy { Image(systemName: followed ? "checkmark" : "plus")
+                .font(.system(size: symbolSize, weight: .heavy)).foregroundStyle(.white) }
+        }
+        .frame(width: diameter, height: diameter)
+        .overlay(Circle().stroke(.black.opacity(0.35), lineWidth: 0.5))
+        // Flatten the solid badge before the native toolbar applies its glass
+        // foreground treatment. The red fill must remain opaque over video.
+        .drawingGroup()
+        .overlay {
+            if busy { ProgressView().controlSize(.mini).tint(.white) }
+        }
     }
 }

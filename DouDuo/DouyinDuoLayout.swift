@@ -4,6 +4,38 @@
 import SwiftUI
 
 enum DYDuoMetrics {
+    static func hingeSplit(_ geo: GeometryProxy) -> (video: CGRect, panel: CGRect, book: Bool)? {
+        guard DYDuoMetrics.foldIsActive(geo) else { return nil }
+        guard #available(iOS 27.1, *) else { return nil }
+        let divisions = geo.reservedRegions(kind: .division).map {
+            DYLiveDivision(frame: $0.frame, isActive: $0.isActive)
+        }
+        guard let p = DYLiveAdaptiveLayoutEngine.hingePanes(
+            bounds: CGRect(origin: .zero, size: geo.size), divisions: divisions) else { return nil }
+        return (p.first, p.second, p.book)
+    }
+
+    /// 窗格右侧被系统遮挡区（状态栏时间/信号）占掉的宽度，最多让 120pt。
+    static func trailingOcclusionInset(_ geo: GeometryProxy, pane: CGRect) -> CGFloat {
+        guard #available(iOS 27.1, *) else { return 0 }
+        var inset: CGFloat = 0
+        for region in geo.reservedRegions(kind: .occlusion) where region.isActive {
+            let f = region.frame
+            guard f.width > 1, f.height > 1, f.intersects(pane), f.midX > pane.midX else { continue }
+            inset = max(inset, pane.maxX - f.minX)
+        }
+        return min(max(0, inset), 120)
+    }
+
+
+    static func actionRailHorizontalOffset(isRegular: Bool, trailingInset: CGFloat,
+                                          columnWidth: CGFloat, outerPadding: CGFloat,
+                                          opticalLeadingInset: CGFloat = 0) -> CGFloat {
+        guard isRegular, trailingInset > 0 else { return 0 }
+        return outerPadding + columnWidth / 2 - trailingInset / 2 - opticalLeadingInset
+    }
+
+
     /// Full-bleed media and sheets deliberately extend past SwiftUI's safe
     /// area. Their controls still clear the physical home-indicator region.
     static var windowBottomInset: CGFloat {
@@ -57,19 +89,57 @@ enum DYDuoMetrics {
     }
 }
 
-// MARK: - 折痕 / 摄像头：整组小幅平移，不大挪
-
-private struct DYNudgePref: PreferenceKey {
-    static var defaultValue: CGSize { .zero }
-    static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
+struct DYFeedRailEntry {
+    let id: String
+    let tab: DYTab
+    let actions: AnyView
 }
+
+struct DYFeedRailPreference: PreferenceKey {
+    static var defaultValue: [DYFeedRailEntry] { [] }
+    static func reduce(value: inout [DYFeedRailEntry], nextValue: () -> [DYFeedRailEntry]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
+/// Read the system bar edge beside the controls; older systems keep the trailing rail.
+struct DYAdaptiveActionRail<Content: View>: View {
+    @ViewBuilder var content: (HorizontalEdge) -> Content
+
+    var body: some View {
+        if #available(iOS 27.1, *) {
+            DYSystemActionRail(content: content)
+        } else {
+            content(.trailing)
+        }
+    }
+}
+
+@available(iOS 27.1, *)
+private struct DYSystemActionRail<Content: View>: View {
+    @Environment(\.toolbarVerticalEdge) private var systemEdge
+    @ViewBuilder var content: (HorizontalEdge) -> Content
+
+    private var edge: HorizontalEdge {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["DOUDUO_RAIL_EDGE"] == "leading" { return .leading }
+        #endif
+        return systemEdge ?? .trailing
+    }
+
+    var body: some View { content(edge) }
+}
+
+// MARK: - 折痕 / 摄像头：整组小幅平移，不大挪
 
 /// 自定义按钮栏避开 active 的 occlusion（外屏摄像头）和 division（折痕）。
 /// 测量放在未平移的布局框上，平移只作用于内容，避免来回抖。
 struct DYRailReservedNudge: ViewModifier {
+    var railEdge: HorizontalEdge? = nil
+    var verticalSpace: ClosedRange<CGFloat>? = nil
     func body(content: Content) -> some View {
         if #available(iOS 27.1, *) {
-            DYRailReservedNudgeBox { content }
+            DYRailReservedNudgeBox(railEdge: railEdge, verticalSpace: verticalSpace) { content }
         } else {
             content
         }
@@ -78,19 +148,24 @@ struct DYRailReservedNudge: ViewModifier {
 
 @available(iOS 27.1, *)
 private struct DYRailReservedNudgeBox<Content: View>: View {
+    var railEdge: HorizontalEdge?
+    var verticalSpace: ClosedRange<CGFloat>?
+    @Environment(\.layoutDirection) private var layoutDirection
     @ViewBuilder var content: () -> Content
     @State private var nudge: CGSize = .zero
 
     var body: some View {
         content()
             .offset(nudge)
+            // Observe geometry changes, including reserved-region changes without a resize.
+            // Measure the unshifted wrapper so our own translation cannot cause feedback.
             .background {
-                GeometryReader { proxy in
-                    Color.clear.preference(key: DYNudgePref.self, value: DYReservedNudge.offset(in: proxy))
-                }
-            }
-            .onPreferenceChange(DYNudgePref.self) { new in
-                if hypot(new.width - nudge.width, new.height - nudge.height) > 0.5 { nudge = new }
+                Color.clear
+                    .onGeometryChange(for: CGSize.self) { proxy in
+                        DYReservedNudge.offset(in: proxy, railEdge: railEdge, layoutDirection: layoutDirection, verticalSpace: verticalSpace)
+                    } action: { new in
+                        if hypot(new.width - nudge.width, new.height - nudge.height) > 0.5 { nudge = new }
+                    }
             }
     }
 }
@@ -98,19 +173,20 @@ private struct DYRailReservedNudgeBox<Content: View>: View {
 @available(iOS 27.1, *)
 enum DYReservedNudge {
     /// 在视图自己的坐标里，把和遮挡区相交的部分挪到最近的一侧。摄像头优先向下，符合外屏「小幅下移」。
-    static func offset(in proxy: GeometryProxy) -> CGSize {
+    static func offset(in proxy: GeometryProxy, railEdge: HorizontalEdge? = nil,
+                       layoutDirection: LayoutDirection = .leftToRight, verticalSpace: ClosedRange<CGFloat>? = nil) -> CGSize {
         let local = CGRect(origin: .zero, size: proxy.size)
         guard local.width > 1, local.height > 1 else { return .zero }
         var box = local
         var acc = CGSize.zero
-        for region in proxy.reservedRegions(kind: .occlusion) where region.isActive && region.frame.intersects(box) {
-            let d = clear(box, region.frame, preferDown: true)
+        for region in proxy.reservedRegions(kind: .occlusion, layoutDirectionBehavior: .fixed) where region.isActive && region.frame.intersects(box) {
+            let d = clear(box, region.frame, preferDown: true, railEdge: railEdge, layoutDirection: layoutDirection, verticalSpace: verticalSpace.map { ($0.lowerBound - acc.height)...($0.upperBound - acc.height) })
             acc.width += d.width
             acc.height += d.height
             box = box.offsetBy(dx: d.width, dy: d.height)
         }
-        for region in proxy.reservedRegions(kind: .division) where region.isActive && region.frame.intersects(box) {
-            let d = clear(box, region.frame, preferDown: false)
+        for region in proxy.reservedRegions(kind: .division, layoutDirectionBehavior: .fixed) where region.isActive && region.frame.intersects(box) {
+            let d = clear(box, region.frame, preferDown: false, railEdge: railEdge, layoutDirection: layoutDirection, verticalSpace: verticalSpace.map { ($0.lowerBound - acc.height)...($0.upperBound - acc.height) })
             acc.width += d.width
             acc.height += d.height
             box = box.offsetBy(dx: d.width, dy: d.height)
@@ -118,14 +194,32 @@ enum DYReservedNudge {
         return acc
     }
 
-    private static func clear(_ box: CGRect, _ region: CGRect, preferDown: Bool) -> CGSize {
+    private static func clear(_ box: CGRect, _ region: CGRect, preferDown: Bool,
+                              railEdge: HorizontalEdge?, layoutDirection: LayoutDirection, verticalSpace: ClosedRange<CGFloat>?) -> CGSize {
         let left = CGSize(width: region.minX - box.maxX, height: 0)
         let right = CGSize(width: region.maxX - box.minX, height: 0)
         let up = CGSize(width: 0, height: region.minY - box.maxY)
         let down = CGSize(width: 0, height: region.maxY - box.minY)
         let mag: (CGSize) -> CGFloat = { abs($0.width) + abs($0.height) }
-        let best = [left, right, up, down].min { mag($0) < mag($1) } ?? .zero
-        if preferDown, mag(down) <= mag(best) + 24 { return down }
+        // Edge rails must move inward rather than taking a shorter path offscreen.
+        let candidates: [CGSize]
+        if let railEdge {
+            let onLeft = (railEdge == .leading) == (layoutDirection == .leftToRight)
+            // Occlusions above an edge rail move it down within the same column.
+            if preferDown {
+                if verticalSpace?.contains(down.height) ?? true { return down }
+                if verticalSpace?.contains(up.height) ?? true { return up }
+                // No vertical slot can fit the complete rail: keep every control onscreen.
+                return onLeft ? right : left
+            }
+            candidates = [onLeft ? right : left, up, down].filter {
+                verticalSpace?.contains($0.height) ?? true
+            }
+        } else {
+            candidates = [left, right, up, down]
+        }
+        let best = candidates.min { mag($0) < mag($1) } ?? .zero
+        if preferDown, (verticalSpace?.contains(down.height) ?? true), mag(down) <= mag(best) + 24 { return down }
         return best
     }
 }
@@ -243,7 +337,7 @@ private struct DYEdgeBottomPanel<Panel: View>: View {
                         }
                 }
                 .frame(width: panelWidth, height: panelHeight, alignment: .top)
-                .glassEffect(.regular, in: shape)
+                .dyPanelGlass(in: shape)
                 .clipShape(shape)
                 .offset(y: dragOffset)
                 .accessibilityElement(children: .contain)
@@ -252,7 +346,7 @@ private struct DYEdgeBottomPanel<Panel: View>: View {
         }
         // Respect the keyboard, while the glass reaches the physical edges.
         .ignoresSafeArea(.container)
-        .toolbarVerticalBehavior(.disabled)
+        .dyDisableVerticalToolbar()
     }
 }
 
@@ -265,7 +359,7 @@ struct DYCommentSheet: View {
 
     var body: some View {
         DYCommentPanel(bridge: bridge, aweme: aweme, onClose: onClose, focus: focus)
-            .toolbarVerticalBehavior(.disabled)
+            .dyDisableVerticalToolbar()
     }
 }
 
@@ -284,6 +378,32 @@ struct DYCommentPaneMetrics {
          paneFraction: CGFloat? = nil) {
         let w = geo.size.width, h = geo.size.height
         resident = allowsResident && DYDuoMetrics.foldIsActive(geo)
+        if resident, let hinge = DYDuoMetrics.hingeSplit(geo) {
+            sideBySide = hinge.book
+            showsPane = true
+            videoSize = hinge.video.size
+            // The hinge panes are measured inside the navigation safe area.
+            // Extend the comment surface to the physical edges, just like the
+            // video, instead of leaving a black border around a smaller card.
+            let bottom = DYDuoMetrics.windowBottomInset
+            let keyboardVisible = geo.safeAreaInsets.bottom > bottom + 1
+            let bottomExtension = keyboardVisible ? 0 : min(geo.safeAreaInsets.bottom, bottom)
+            if hinge.book {
+                let split = (hinge.video.maxX + hinge.panel.minX) / 2
+                paneOrigin = CGPoint(x: split, y: -geo.safeAreaInsets.top)
+                paneSize = CGSize(width: w + geo.safeAreaInsets.trailing - split,
+                                  height: h + geo.safeAreaInsets.top + bottomExtension)
+                trailingInset = max(geo.safeAreaInsets.trailing,
+                    DYDuoMetrics.trailingOcclusionInset(geo, pane: hinge.panel))
+            } else {
+                let split = (hinge.video.maxY + hinge.panel.minY) / 2
+                paneOrigin = CGPoint(x: -geo.safeAreaInsets.leading, y: split)
+                paneSize = CGSize(width: w + geo.safeAreaInsets.leading + geo.safeAreaInsets.trailing,
+                                  height: h + bottomExtension - split)
+                trailingInset = geo.safeAreaInsets.trailing
+            }
+            return
+        }
         let tableFold = resident && w <= h
         sideBySide = w >= DYDuoMetrics.legacyWideMin || (resident && w > h)
         showsPane = resident || (sideBySide && isPresented)
@@ -322,14 +442,41 @@ struct DYCommentPlayerLayout<Video: View>: View {
     @Binding var showComments: Bool
     var focus: DYCommentFocus? = nil
     var onBack: () -> Void
+    @AppStorage(DDChromeMode.key) private var chromeModeRaw = DDChromeMode.classic.rawValue
     @ViewBuilder var video: (EdgeInsets) -> Video
 
+    private var usesClassicLayout: Bool {
+        if #available(iOS 27.1, *) { return chromeModeRaw == DDChromeMode.duoClassic.rawValue }
+        return false
+    }
+
     var body: some View {
+        Group {
+            if usesClassicLayout { classicBody } else { upstreamBody }
+        }
+    }
+
+    private var upstreamBody: some View {
+        GeometryReader { geo in
+            video(geo.safeAreaInsets)
+                .environment(\.dyStandaloneBack, onBack)
+                .sheet(isPresented: $showComments) {
+                    if let aweme {
+                        DYCommentPanel(bridge: bridge, aweme: aweme,
+                                       onClose: { showComments = false }, focus: focus)
+                            .presentationDetents([.fraction(0.62)])
+                    }
+                }
+        }
+    }
+
+    private var classicBody: some View {
         NavigationStack {
             GeometryReader { geo in
                 let layout = DYCommentPaneMetrics(geo, isPresented: showComments)
                 ZStack(alignment: .topLeading) {
                     video(geo.safeAreaInsets)
+                        .environment(\.dyStandaloneBack, onBack)
                         .environment(\.duoInlineVideoNavigation, layout.showsPane)
                         .frame(width: layout.videoSize.width, height: layout.videoSize.height)
                     if layout.showsPane, let aweme {
@@ -349,12 +496,11 @@ struct DYCommentPlayerLayout<Video: View>: View {
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
                 .background(Color.black.ignoresSafeArea())
                 .overlayPreferenceValue(DYActiveVideoActionsKey.self) { actions in
-                    DYStandaloneVideoActions(actions: showComments || layout.showsPane ? nil : actions, onBack: onBack)
+                    if #available(iOS 27.1, *), chromeModeRaw == DDChromeMode.duoClassic.rawValue {
+                        DYStandaloneVideoActions(actions: showComments || layout.showsPane ? nil : actions, onBack: onBack)
+                    }
                 }
-                .toolbarVisibility(.hidden, for: .tabBar)
-                .toolbarVisibility(.visible, for: .navigationBar)
-                .toolbarVerticalCompressionBehavior(.prefersToolbarItems)
-                .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
+                .modifier(DYStandaloneBarPolicy(classic: chromeModeRaw == DDChromeMode.duoClassic.rawValue))
                 .animation(.snappy, value: showComments)
                 .animation(.snappy, value: layout.resident)
                 .dyBottomSheet(isPresented: Binding(
@@ -367,6 +513,48 @@ struct DYCommentPlayerLayout<Video: View>: View {
                     }
                 }
             }
+        }
+    }
+}
+
+
+extension View {
+    @ViewBuilder func dyDisableVerticalToolbar() -> some View {
+        if #available(iOS 27.1, *) { self.toolbarVerticalBehavior(.disabled) }
+        else { self }
+    }
+    @ViewBuilder func dyPanelGlass<S: Shape>(in shape: S) -> some View {
+        if #available(iOS 26.0, *) { self.glassEffect(.regular, in: shape) }
+        else { self.background(.ultraThinMaterial, in: shape) }
+    }
+}
+
+private struct DYStandaloneBarPolicy: ViewModifier {
+    let classic: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(iOS 27.1, *), classic {
+            content.toolbarVisibility(.hidden, for: .tabBar)
+                .toolbarVisibility(.visible, for: .navigationBar)
+                .toolbarVerticalCompressionBehavior(.prefersToolbarItems)
+                .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
+        } else {
+            content.toolbar(.hidden, for: .navigationBar)
+        }
+    }
+}
+
+
+struct DYScrollTopObserver: ViewModifier {
+    @Binding var atTop: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollGeometryChange(for: Bool.self) { geo in
+                geo.contentOffset.y + geo.contentInsets.top <= 1
+            } action: { _, top in atTop = top }
+        } else {
+            // iOS 17 retains header-drag/right-swipe dismissal; a list scroll
+            // must never dismiss a panel without reliable scroll-position data.
+            content.onAppear { atTop = false }
         }
     }
 }

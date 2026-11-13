@@ -335,7 +335,10 @@ private struct DYChatPaneBoundsKey: PreferenceKey {
 }
 
 struct DYMessagesScreen: View {
+    @Environment(\.dismiss) private var dismissRoot
+    @AppStorage(DDChromeMode.key) private var chromeModeRaw = DDChromeMode.classic.rawValue
     let bridge: DouyinBridge
+    var onClose: (() -> Void)? = nil
     let onWeb: (URL) -> Void
 
     @State private var navigation = DYMessageNavigation()
@@ -369,6 +372,11 @@ struct DYMessagesScreen: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     // The message center is a root tab. Only its detail pages go back.
+                    if !navigation.hasDetail && chromeModeRaw != DDChromeMode.duoClassic.rawValue {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("返回", systemImage: "chevron.backward") { if let onClose { onClose() } else { dismissRoot() } }
+                        }
+                    }
                     if navigation.hasDetail {
                         ToolbarItem(placement: .cancellationAction) {
                             Button("返回", systemImage: "chevron.backward", action: backFromMessage)
@@ -1778,6 +1786,11 @@ struct DYEdgeSwipeBack: ViewModifier {
 
 /// 原生转发浮层；官网仅作后台数据与发送桥，登录时才显式进入官网。
 struct DYForwardScreen: View {
+    @AppStorage(DDChromeMode.key) private var mode = DDChromeMode.classic.rawValue
+    private var usesClassicLayout: Bool {
+        if #available(iOS 27.1, *) { return mode == DDChromeMode.duoClassic.rawValue }
+        return false
+    }
     let item: DYAweme
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme
@@ -1799,7 +1812,7 @@ struct DYForwardScreen: View {
         if !model.contacts.isEmpty { result.append(.init(id: "private", title: "私信好友", symbol: "paperplane.fill")) }
         if model.contacts.contains(where: { $0.kind == 2 }) { result.append(.init(id: "groups", title: "分享至群", symbol: "person.2.fill")) }
         result.append(.init(id: "copy", title: "复制链接", symbol: "link"))
-        result.append(.init(id: "download", title: saving ? "保存中…" : "下载", symbol: "arrow.down.to.line"))
+        if usesClassicLayout { result.append(.init(id: "download", title: saving ? "保存中…" : "下载", symbol: "arrow.down.to.line")) }
         result.append(.init(id: "other", title: "其他分享", symbol: "square.and.arrow.up"))
         if model.loginRequired { result.append(.init(id: "login", title: "登录抖音", symbol: "person.crop.circle")) }
         else if !model.loading && model.contacts.isEmpty { result.append(.init(id: "retry", title: "重新加载", symbol: "arrow.clockwise")) }
@@ -1808,7 +1821,7 @@ struct DYForwardScreen: View {
     private var visibleContacts: [DYForwardContact] {
         model.contacts.filter { (!groupsOnly || $0.kind == 2) && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) }
     }
-    var body: some View {
+    private var classicPanel: some View {
         DYNativeForwardPanel(contacts: accountPrepared ? model.contacts : [], loading: !accountPrepared || model.loading || model.sending,
                              status: accountPrepared ? (saveMessage ?? (copiedLink ? "链接已复制" : model.message)) : "正在加载朋友…", actions: actions,
                              onContact: { if !model.sending { selected = $0 } },
@@ -1825,6 +1838,33 @@ struct DYForwardScreen: View {
                         .allowsHitTesting(false).accessibilityHidden(true)
                 }
             }
+    }
+    private var upstreamPanel: some View {
+        GeometryReader { geo in
+            ZStack {
+                theme.media.strongScrim.color(for: scheme).opacity(0.24).ignoresSafeArea()
+                    .onTapGesture { if !model.sending { dismiss() } }
+                DYNativeForwardPanel(contacts: accountPrepared ? model.contacts : [], loading: !accountPrepared || model.loading || model.sending,
+                                     status: accountPrepared ? model.message : "正在恢复朋友缓存…", actions: accountPrepared ? actions : [],
+                                     onContact: { if !model.sending { selected = $0 } },
+                                     onAction: perform, onClose: { if !model.sending { dismiss() } })
+                    .frame(width: max(0, min(560, geo.size.width - 32)))
+                // 挂载真实官方分享组件，保留React事件与鉴权，但不让网页进入用户界面或无障碍树。
+                if accountPrepared && !model.layoutFixture {
+                    DYForwardWebContainer(model: model, url: item.webURL)
+                        .id(model.accountScope)
+                        .frame(width: 760, height: 640)
+                        .frame(width: 1, height: 1).clipped().opacity(0.001)
+                        .allowsHitTesting(false).accessibilityHidden(true)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+    var body: some View {
+        Group {
+            if usesClassicLayout { classicPanel } else { upstreamPanel }
+        }
         .interactiveDismissDisabled(model.sending)
         .task(id: copiedLink) {
             guard copiedLink else { return }
@@ -1860,6 +1900,8 @@ struct DYForwardScreen: View {
         .sheet(isPresented: $showLogin, onDismiss: { Task { await restorePeople() } }) { DYForwardOfficialScreen(item: item) }
         .sheet(isPresented: $showOtherApps) { DYForwardSystemShare(url: item.webURL) }
         .task { await restorePeople() }
+        .onAppear { if !usesClassicLayout { DDPlayback.shared.pauseAll(reason: .cover) } }
+        .onDisappear { if !usesClassicLayout { DDPlayback.shared.releaseCover() } }
     }
     private func restorePeople() async {
         if model.layoutFixture { accountPrepared = true; return }
@@ -1872,7 +1914,7 @@ struct DYForwardScreen: View {
         guard !model.sending else { return }
         switch action {
         case "private", "groups": groupsOnly = action == "groups"; query = ""; showContacts = true
-        case "copy": UIPasteboard.general.url = item.webURL; saveMessage = nil; copiedLink = true
+        case "copy": UIPasteboard.general.url = item.webURL; saveMessage = nil; copiedLink = true; if !usesClassicLayout { model.message = "链接已复制" }
         case "download":
             guard !saving else { return }
             saving = true
@@ -2338,5 +2380,41 @@ extension DYMessagesScreen {
     static func badge(_ groups: [DYNoticeCount]) -> Int {
         if let all = groups.first(where: { $0.group == DYNoticeGroup.all.rawValue }) { return all.count }
         return groups.reduce(0) { $0 + $1.count }
+    }
+}
+
+private struct DYForwardActionKey: EnvironmentKey {
+    static let defaultValue: (() -> Void)? = nil
+}
+private extension EnvironmentValues {
+    var dyForwardAction: (() -> Void)? {
+        get { self[DYForwardActionKey.self] }
+        set { self[DYForwardActionKey.self] = newValue }
+    }
+}
+
+/// 状态挂在稳定的菜单外层，而不是会随原生菜单关闭而销毁的条目里。
+struct DYForwardPresentation: ViewModifier {
+    let item: DYAweme
+    @State private var showing = false
+    func body(content: Content) -> some View {
+        content.environment(\.dyForwardAction, { showing = true })
+            .fullScreenCover(isPresented: $showing) {
+                DYForwardScreen(item: item).presentationBackground(.clear)
+            }
+    }
+}
+
+struct DYForwardMenu: View {
+    let item: DYAweme
+    let bridge: DouyinBridge?
+    let foreground: Color
+    @Environment(\.dyForwardAction) private var showFriends
+    var body: some View {
+        Button { showFriends?() } label: {
+            Label("转发", systemImage: "arrowshape.turn.up.right")
+        }
+        .disabled(showFriends == nil)
+        .accessibilityIdentifier("douyin.forward.menu")
     }
 }

@@ -2,15 +2,15 @@ name: DouDuo
 options:
   bundleIdPrefix: me.rrmm
   deploymentTarget:
-    iOS: "27.1"
+    iOS: "26.0"
   createIntermediateGroups: true
 packages:
   VLCKitSPM:
     path: Vendor/VLCKit
 settings:
   base:
-    MARKETING_VERSION: 1.3.12
-    CURRENT_PROJECT_VERSION: "95"
+    MARKETING_VERSION: 1.3.14
+    CURRENT_PROJECT_VERSION: "98"
     SWIFT_VERSION: "5.0"
     DEVELOPMENT_TEAM: ""
 targets:
@@ -23,10 +23,10 @@ targets:
       - package: VLCKitSPM
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.zenghongjvn.douduo
+        PRODUCT_BUNDLE_IDENTIFIER: me.rrmm.douduo
         PRODUCT_NAME: DouDuo
         INFOPLIST_KEY_CFBundleDisplayName: DouDuo
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES
@@ -44,7 +44,7 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
-        # 普通播放退出即暂停；视频设置可开启后台音频，清屏可使用系统画中画。
+        # 后台播放：默认仍是切后台就停声；只有「更多」菜单里打开「后台播放」才会继续响（代码里按开关判断）
         UIBackgroundModes: [audio]
   DouDuoUITests:
     type: bundle.ui-testing
@@ -55,7 +55,7 @@ targets:
       - target: DouDuo
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.zenghongjvn.douduo.uitests
+        PRODUCT_BUNDLE_IDENTIFIER: me.rrmm.douduo.uitests
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: DouDuo
 schemes:
