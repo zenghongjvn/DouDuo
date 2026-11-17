@@ -219,11 +219,6 @@ final class DYAccountStore: ObservableObject {
     }
 }
 
-extension Notification.Name {
-    /// 信息页右侧栏「账号」→ 让嵌在里面的「我的」弹账号页
-    static let dyOpenAccounts = Notification.Name("douduo.openAccounts")
-}
-
 /// 「我的」→ 账号：列出存着的账号，切换 / 添加 / 退出 / 移除
 struct DYAccountsScreen: View {
     @Environment(\.dismiss) private var dismiss

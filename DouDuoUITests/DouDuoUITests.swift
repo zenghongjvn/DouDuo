@@ -61,6 +61,96 @@ final class DouDuoUITests: XCTestCase {
         attach(app, "mine-light-grid-bounds")
     }
 
+    func testMineScrollInClassicLayout() { verifyMineScroll(mode: "duoClassic") }
+    func testMineScrollInDefaultLayout() { verifyMineScroll(mode: "classic") }
+    func testMineScrollInRailLayout() { verifyMineScroll(mode: "rail") }
+    func testMineScrollInMinimalLayout() { verifyMineScroll(mode: "minimal") }
+
+    private func verifyMineScroll(mode: String) {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        addTeardownBlock { app.terminate() }
+        app.launchArguments = ["-douyin_muted_v1", "YES", "-douyin_autoplay_v1", "NO",
+                               "-duoduomain_tab_v1", "首页", "-douduo_dismissed_update_v1", "9.9.9"]
+
+        let embedded = mode == "rail" || mode == "minimal"
+        app.launchEnvironment = ["DOUDUO_CHROME_MODE":mode, "DOUDUO_APPEARANCE":"dark",
+            "DOUDUO_SELF_FIXTURE":"1", "DOUDUO_GRID_FIXTURE":"1", "DOUDUO_HASHTAG_FIXTURE":"1",
+            "DOUDUO_FAKE_ACCOUNTS":"1"]
+        app.launch()
+
+        if embedded {
+            let menu = app.buttons["douyin.module.menu"].firstMatch
+            XCTAssertTrue(menu.waitForExistence(timeout: 15), mode)
+            menu.tap()
+            app.buttons["douyin.module.mine"].firstMatch.tap()
+        } else if mode == "duoClassic" {
+            let mine = app.buttons["我的"].firstMatch
+            XCTAssertTrue(mine.waitForExistence(timeout: 15))
+            if !mine.isHittable { app.buttons["首页"].firstMatch.tap() }
+            mine.tap()
+        } else {
+            let mine = app.buttons["douyin.mine.top"].firstMatch
+            XCTAssertTrue(mine.waitForExistence(timeout: 15))
+            mine.tap()
+        }
+
+        let account = app.buttons["douyin.mine.accounts"].firstMatch
+        let tabs = app.buttons["douyin.mine.post"].firstMatch
+        let bio = app.staticTexts["douyin.mine.bio"].firstMatch
+        let scroll = app.scrollViews["douyin.mine.scroll"].firstMatch
+        let history = app.buttons["douyin.mine.history"].firstMatch
+        let later = app.buttons["douyin.mine.later"].firstMatch
+        XCTAssertTrue(app.buttons["douyin.grid.item.hashtag-travel"].firstMatch.waitForExistence(timeout: 15), mode)
+        attach(app, "mine-\(mode)-expanded")
+        XCTAssertTrue(account.label.contains("DouDuo2026"))
+        XCTAssertTrue(waitUntil(timeout: 5) { bio.exists }, mode)
+        XCTAssertTrue(history.isHittable)
+        XCTAssertTrue(later.isHittable)
+        let expandedAccount = account.frame
+        let expandedTabs = tabs.frame
+        let historyPosition = history.frame
+
+        // A short, slow drag should leave both rows at the same intermediate offset.
+        let dragStart = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.65))
+        let dragEnd = dragStart.withOffset(CGVector(dx: 0, dy: -52))
+        dragStart.press(forDuration: 0.05, thenDragTo: dragEnd, withVelocity: .slow, thenHoldForDuration: 0.3)
+        let partialAccount = account.frame
+        let partialTravel = expandedAccount.minY - partialAccount.minY
+        XCTAssertGreaterThan(partialTravel, 14)
+        XCTAssertEqual(expandedTabs.minY - tabs.frame.minY, partialTravel, accuracy: 3)
+        if mode == "duoClassic" { attach(app, "mine-duoClassic-partial") }
+
+        scroll.swipeUp()
+        XCTAssertTrue(waitUntil(timeout: 6) {
+            account.frame.minY < expandedAccount.minY - 24 && tabs.frame.minY < expandedTabs.minY - 44
+        }, mode)
+        let collapsedAccount = account.frame
+        let collapsedTabs = tabs.frame
+        XCTAssertLessThan(collapsedAccount.minY, partialAccount.minY - 12)
+        scroll.swipeUp()
+        XCTAssertEqual(account.frame.minY, collapsedAccount.minY, accuracy: 2)
+        XCTAssertEqual(tabs.frame.minY, collapsedTabs.minY, accuracy: 2)
+        XCTAssertEqual(history.frame.minY, historyPosition.minY, accuracy: 2)
+        XCTAssertFalse(bio.exists)
+        attach(app, "mine-\(mode)-collapsed")
+
+        history.tap()
+        XCTAssertTrue(app.buttons["douyin.mine.history.clear"].waitForExistence(timeout: 8))
+        later.tap()
+        let heading = app.staticTexts["douyin.mine.listHeading"].firstMatch
+        XCTAssertTrue(waitUntil(timeout: 8) { heading.exists && heading.label == "稍后再看" })
+        tabs.tap()
+        for _ in 0..<3 where !bio.exists { scroll.swipeDown() }
+        XCTAssertTrue(waitUntil(timeout: 6) { abs(account.frame.minY - expandedAccount.minY) < 2 }, mode)
+        XCTAssertTrue(bio.exists)
+        XCTAssertTrue(scroll.frame.contains(bio.frame))
+        XCTAssertEqual(tabs.frame.minY, expandedTabs.minY, accuracy: 2)
+        account.tap()
+        XCTAssertTrue(app.buttons["douyin.account.add"].waitForExistence(timeout: 8))
+        app.terminate()
+    }
+
     func testAppearanceClassic() throws { try verifyAppearance(mode: "duoClassic") }
     func testAppearanceOrdinary() throws { try verifyAppearance(mode: "classic") }
 
@@ -1760,17 +1850,20 @@ final class DouDuoUITests: XCTestCase {
         let close = app.buttons["douyin.login.close"].firstMatch
         if close.waitForExistence(timeout: 15) { close.tap() }
         let accounts = app.buttons["douyin.mine.accounts"].firstMatch
-        XCTAssertTrue(accounts.waitForExistence(timeout: 10), "「我的」右侧栏没有「账号」")
+        XCTAssertTrue(accounts.waitForExistence(timeout: 10), "「我的」没有切换账号入口")
+        let history = app.buttons["douyin.mine.history"].firstMatch
+        XCTAssertTrue(history.isHittable)
+        XCTAssertTrue(app.buttons["douyin.mine.later"].isHittable)
         XCTAssertEqual(app.buttons.matching(identifier: "douyin.mine.accounts").count, 1, "「账号」出现了不止一个")
         for id in ["douyin.messages.rail.interactive", "douyin.messages.rail.fans", "douyin.messages.rail.system", "douyin.messages.rail.stranger"] {
             XCTAssertFalse(app.buttons[id].exists, "「我的」页还显示 \(id)")
         }
         let back = app.buttons["douyin.messages.close"].firstMatch
         XCTAssertTrue(back.exists, "没有返回键")
-        XCTAssertFalse(back.frame.intersects(accounts.frame), "「账号」跟返回键重叠")
+        XCTAssertFalse(back.frame.intersects(history.frame), "「历史」跟返回键重叠")
         attach(app, "mine-rail")
         accounts.tap()
-        XCTAssertTrue(app.buttons["douyin.account.add"].waitForExistence(timeout: 8), "点右侧栏「账号」没打开账号页")
+        XCTAssertTrue(app.buttons["douyin.account.add"].waitForExistence(timeout: 8), "点「账号」没打开账号页")
         app.buttons["关闭"].firstMatch.tap()
         // 回信息页：四个分类回来
         app.buttons["douyin.messages.tab.messages"].firstMatch.tap()

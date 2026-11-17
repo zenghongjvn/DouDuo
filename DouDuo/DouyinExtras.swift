@@ -38,6 +38,8 @@ struct DYUser: Decodable, Equatable {
     let ip: String?
     /// 仅「我的」页使用。作者页不读取，避免把别人的封面画进当前资料卡。
     let cover: String?
+    var douyinID: String? = nil
+    var mutualFollows: Int? = nil
 }
 
 /// 评论表情（抖音官方表情包）
@@ -70,8 +72,16 @@ struct DYSug: Identifiable, Decodable, Equatable {
     let word: String
 }
 
+extension Notification.Name {
+    /// 信息页托管「我的」时，沿用外层的右侧栏。
+    static let dyOpenMineShortcut = Notification.Name("douduo.openMineShortcut")
+}
+
 enum DYListKind: String, CaseIterable, Identifiable {
     case post, like, collect, history, later
+    static let profileTabs: [Self] = [.post, .like, .collect]
+    static let profileShortcuts: [Self] = [.history, .later]
+
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -443,7 +453,9 @@ extension DouyinBridge {
     const umap = u => u ? ({ name: u.nickname || '', avatar: first(u.avatar_larger) || first(u.avatar_thumb), signature: u.signature || '',
       secUid: u.sec_uid || '', uid: u.uid ? String(u.uid) : '', followers: u.follower_count || u.mplatform_followers_count || 0, following: u.following_count || 0,
       likes: u.total_favorited || 0, works: u.aweme_count || 0, ip: u.ip_location || null,
-      cover: coverOf(u.cover_url) || coverOf(u.white_cover_url) }) : null;
+      cover: coverOf(u.cover_url) || coverOf(u.white_cover_url),
+      douyinID: u.unique_id || (u.short_id && String(u.short_id) !== '0' ? String(u.short_id) : null),
+      mutualFollows: u.friend_count ?? null }) : null;
     """#
 
     static let selfJS = userMap + #"""
@@ -840,7 +852,6 @@ struct DYGrid: View {
     /// 长按格子出的移除项（例如「移出稍后再看」）。两个都给了才有长按菜单。
     var removeTitle: String? = nil
     var onRemove: ((DYAweme) -> Void)? = nil
-    private let cols = [GridItem(.adaptive(minimum: 140), spacing: 2)]
 
     @ViewBuilder
     private func gridButton(_ i: Int, _ a: DYAweme) -> some View {
@@ -858,35 +869,31 @@ struct DYGrid: View {
     }
 
     var body: some View {
-        // 底部哨兵只在真正滚进可视区时才翻页：ScrollView 的非惰性子视图会立刻 onAppear，
-        // 直接 onAppear 会一页接一页把作者作品全拉下来（2026-11-07 实测）。
-        GeometryReader { outer in
-            ScrollView {
-                LazyVGrid(columns: cols, spacing: 2) {
-                    ForEach(Array(items.enumerated()), id: \.element.id) { i, a in
-                        gridButton(i, a)
-                    }
-                }
-                if let error {
-                    Text(error).font(.footnote).foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center).padding(24)
-                } else if loading {
-                    ProgressView().tint(.primary).padding(24)
-                } else if items.isEmpty {
-                    Text("这里还没有内容").font(.footnote).foregroundStyle(.secondary).padding(40)
-                } else if hasMore {
-                    Color.clear
-                        .frame(height: 40)
-                        .background(
-                            GeometryReader { g in
-                                Color.clear.preference(key: DYBottomYKey.self, value: g.frame(in: .named("ddgrid")).minY)
-                            }
-                        )
+        ScrollView { rows(columns: [GridItem(.adaptive(minimum: 140), spacing: 2)]) }
+    }
+
+    /// Also used inside the profile's scroll view so the covers and header move together.
+    func rows(columns: [GridItem], spacing: CGFloat = 2) -> some View {
+        VStack(spacing: 0) {
+            LazyVGrid(columns: columns, spacing: spacing) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { i, a in
+                    gridButton(i, a)
                 }
             }
-            .coordinateSpace(name: "ddgrid")
-            .onPreferenceChange(DYBottomYKey.self) { y in
-                if y < outer.size.height - 16 { onLoadMore() }
+            if let error {
+                Text(error).font(.footnote).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center).padding(24)
+            } else if loading {
+                ProgressView().tint(.primary).padding(24)
+            } else if items.isEmpty {
+                Text("这里还没有内容").font(.footnote).foregroundStyle(.secondary).padding(40)
+            } else if hasMore {
+                // A visible footer, rather than onAppear, drives pagination.
+                Color.clear.frame(height: 40)
+                    .onScrollVisibilityChange(threshold: 0.4) { visible in
+                        if visible { onLoadMore() }
+                    }
+                    .accessibilityHidden(true)
             }
         }
     }
@@ -925,11 +932,6 @@ struct DYGrid: View {
             .clipped()
             .contentShape(Rectangle())
     }
-}
-
-private struct DYBottomYKey: PreferenceKey {
-    static var defaultValue: CGFloat = .greatestFiniteMagnitude
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = min(value, nextValue()) }
 }
 
 // MARK: - 列表播放器（从网格点进来，上下滑接着看）
@@ -1579,9 +1581,30 @@ struct FlowLayout: Layout {
 
 // MARK: - 我的
 
+extension EnvironmentValues {
+    @Entry var dyMineTopInset: CGFloat = 0
+    @Entry var dyMineRailInset: CGFloat = 0
+}
+
+extension View {
+    @ViewBuilder
+    func dyMineStatusBarVisible(_ active: Bool = true) -> some View {
+        if #available(iOS 27.0, *), active {
+            toolbarVisibility(.visible, for: .statusBar)
+        } else {
+            self
+        }
+    }
+}
+
 struct DYMineScreen: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.dyHingeClosed) private var hingeClosed
+    @Environment(\.dyMineTopInset) private var embeddedTopInset
+    @Environment(\.dyMineRailInset) private var embeddedRailInset
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ScaledMetric(relativeTo: .title3) private var avatarSize = 64.0
     @AppStorage(DDChromeMode.key) private var chromeModeRaw = DDChromeMode.classic.rawValue
     let bridge: DouyinBridge
     let onLogin: () -> Void
@@ -1601,6 +1624,17 @@ struct DYMineScreen: View {
     /// App 内登录页（DYAppLoginScreen）；检测到未登录时进「我的」先弹它（老板 2026-11-17）
     @State private var showLogin = false
     @State private var showAccounts = false
+    @State private var scrollPosition = ScrollPosition()
+    @State private var headerScroll: CGFloat = 0
+    @State private var identityHeight: CGFloat = 90
+    @State private var detailsHeight: CGFloat = 0
+    @State private var tabsHeight: CGFloat = 44
+
+    private var usesFullHeight: Bool { DYDuoMetrics.isDuoHardware && hingeClosed }
+    private var topPadding: CGFloat { usesFullHeight ? 0 : embeddedTopInset }
+
+    private var tabAccent: Color { scheme == .dark ? Color(red: 1, green: 0.81, blue: 0.25) : Color(red: 0.59, green: 0.39, blue: 0.04) }
+
     /// 这次打开期间已经自动弹过登录：放在静态里——简洁 / 极简模式在信息 ⇄ 我的之间切换会重建「我的」，
     /// @State 会被重置，导致每切回来一次就再弹一次登录
     private static var autoLoginShownAt: Date?
@@ -1615,24 +1649,37 @@ struct DYMineScreen: View {
                 // 左缘右滑返回（和左上「返回」同条件：经典模式下「我的」是底部 Tab，没有上一层）
                 .dyEdgeBack(enabled: !embedded && chromeModeRaw != DDChromeMode.duoClassic.rawValue) { dismiss() }
                 .modifier(DYSystemTabBar())
-                .navigationTitle(user?.name ?? "我的")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar(embedded ? .hidden : .automatic, for: .navigationBar)
+                .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
+                .scrollEdgeEffectHidden(true, for: .all)
+                .dyMineStatusBarVisible()
                 .toolbar {
-                    if !embedded && chromeModeRaw != DDChromeMode.duoClassic.rawValue {
-                        ToolbarItem(placement: .navigation) { Button("返回", systemImage: "chevron.backward") { dismiss() } }
-                    }
-                    // 「网页版 / 登录」按钮已按老板要求去掉：未登录时页内仍有「去登录」入口，功能不受影响
-                    // 嵌在信息页（简洁 / 极简）时「账号」在右侧栏，顶栏不放，免得跟返回键挤在一起
                     if !embedded {
-                        ToolbarItem(placement: .primaryAction) {
-                            Button("账号", systemImage: "person.2.circle") { showAccounts = true }
-                                .accessibilityIdentifier("douyin.mine.accounts")
+                        if chromeModeRaw != DDChromeMode.duoClassic.rawValue {
+                            ToolbarItem(placement: .navigation) {
+                                Button("返回", systemImage: "chevron.backward") { dismiss() }
+                                    .accessibilityIdentifier("douyin.mine.back")
+                            }
+                        }
+                        if #available(iOS 27.1, *) {
+                            ToolbarItem(placement: .bottomBar) {
+                                DYMineToolbarShortcuts(selection: kind) { kind = $0 }
+                            }
+                            .sharedBackgroundVisibility(.hidden)
+                            .axisBehavior(.verticalPreferred)
+                            .visibilityPriority(.high)
+                        } else {
+                            ToolbarItem(placement: .primaryAction) {
+                                DYMineShortcuts(vertical: false, selection: kind) { kind = $0 }
+                            }
                         }
                     }
                 }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .dyOpenAccounts)) { _ in if embedded { showAccounts = true } }
+        .onReceive(NotificationCenter.default.publisher(for: .dyOpenMineShortcut)) { note in
+            if embedded, let shortcut = note.object as? DYListKind { kind = shortcut }
+        }
         .sheet(isPresented: $showAccounts) {
             DYAccountsScreen(onChanged: { Task { await accountChanged() } },
                              onAddAccount: {
@@ -1648,6 +1695,9 @@ struct DYMineScreen: View {
 
     /// 切换 / 退出 / 添加账号后：签名页重载，清空当前页面数据，重新读资料
     private func accountChanged(showLoginAfter: Bool = false) async {
+        scrollPosition.scrollTo(edge: .top)
+        headerScroll = 0
+        detailsHeight = 0
         user = nil; userErr = nil; models = [:]
         bridge.reload()
         onLogin()   // 外层刷新推荐流
@@ -1662,7 +1712,7 @@ struct DYMineScreen: View {
         if ProcessInfo.processInfo.environment["DOUDUO_SELF_FIXTURE"] == "1" {
             user = DYUser(name: "测试账号", avatar: nil, signature: "这是一段测试用的个人简介，用来检查页头布局。",
                           secUid: "fixture", uid: "1", followers: 1280, following: 96, likes: 35600, works: 42,
-                          ip: "IP属地：广东", cover: nil)
+                          ip: "IP属地：广东", cover: nil, douyinID: "DouDuo2026", mutualFollows: 32)
             userErr = nil
             if user != nil { models = [:]; ensure(kind) }
             return
@@ -1680,65 +1730,17 @@ struct DYMineScreen: View {
     }
 
     private var content: some View {
-        VStack(spacing: 0) {
-            if embedded {
-                // 跟信息页「消息」标题同字号、同高度、同位置
-                HStack {
-                    Text("我的").font(.title2.weight(.semibold))
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 20)
-                .frame(height: theme.messages.headerHeight)
-                .accessibilityIdentifier("douyin.mine.title")
-            }
-            header.padding(.horizontal, 16).padding(.bottom, 12)
-
-            HStack(spacing: 22) {
-                ForEach(DYListKind.allCases) { k in
-                    Button { kind = k } label: {
-                        VStack(spacing: 5) {
-                            Text(k.title).font(.subheadline.weight(kind == k ? .bold : .medium))
-                                .foregroundStyle(Color.primary.opacity(kind == k ? 1 : 0.6))
-                            Capsule().fill(Color.primary).frame(width: 18, height: 2.5).opacity(kind == k ? 1 : 0)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("douyin.mine.\(k.rawValue)")
-                }
-            }
-            .padding(.bottom, 6)
-
-            if kind == .history || manageMsg != nil {
-                HStack(spacing: 10) {
-                    if let manageMsg {
-                        Text(manageMsg).font(.caption).foregroundStyle(.orange).lineLimit(2)
-                    }
-                    Spacer(minLength: 0)
-                    if kind == .history {
-                        Button(clearingHistory ? "清空中…" : "清空历史", systemImage: "trash") { confirmClearHistory = true }
-                            .font(.caption)
-                            .disabled(clearingHistory)
-                            .accessibilityIdentifier("douyin.mine.history.clear")
-                    }
-                }
-                .padding(.horizontal, 16).padding(.bottom, 6)
-            }
-
-            if let m = models[kind] {
-                DYMineList(model: m, showsPlayCount: kind == .post,
-                           removeTitle: kind == .later ? "移出稍后再看" : nil,
-                           onRemove: kind == .later ? { a in Task { await removeLater(a, from: m) } } : nil) { i in
-                    open = DYListTarget(title: kind.title, items: m.items, start: i, model: m)
-                }
-                .id(kind)
-            }
+        GeometryReader { geo in
+            profileScroll(in: geo.size)
         }
-        .background(alignment: .top) {
-            DYSelfProfileBackdrop(cover: user?.cover)
-        }
+        .ignoresSafeArea(.container, edges: usesFullHeight ? .top : [])
         .background(Color.ddBackground.ignoresSafeArea())
         .task {
             #if DEBUG
+            if ProcessInfo.processInfo.environment["DOUDUO_SELF_FIXTURE"] == "1" {
+                await loadSelf()
+                return
+            }
             // UI-only entry fixture: a real public work, never a fake account list.
             if ProcessInfo.processInfo.environment["DOUDUO_COMMENT_ENTRY"] == "mine",
                let id = ProcessInfo.processInfo.environment["DOUDUO_VIDEO_ID"],
@@ -1771,7 +1773,11 @@ struct DYMineScreen: View {
             DYAppLoginScreen()
         }
         .onAppear { ensure(kind) }
-        .onChange(of: kind) { _, k in manageMsg = nil; ensure(k) }
+        .onChange(of: kind) { _, k in
+            manageMsg = nil
+            ensure(k)
+            scrollPosition.scrollTo(y: max(0, headerScroll))
+        }
         .alert("清空观看历史？", isPresented: $confirmClearHistory) {
             Button("清空", role: .destructive) { Task { await clearHistory() } }
             Button("取消", role: .cancel) {}
@@ -1817,7 +1823,20 @@ struct DYMineScreen: View {
         if ProcessInfo.processInfo.environment["DOUDUO_COMMENT_ENTRY"] == "mine" { return }
         if ProcessInfo.processInfo.environment["DOUDUO_GRID_FIXTURE"] == "1" {
             guard models[k] == nil else { return }
-            let model = DYPagedModel { _ in (items: DYFeedModel.hashtagFixtures, cursor: "0", hasMore: false) }
+            let model = DYPagedModel { _ in
+                var items = DYFeedModel.hashtagFixtures
+                if ProcessInfo.processInfo.environment["DOUDUO_SELF_FIXTURE"] == "1",
+                   let images = items.first?.images {
+                    items += (1...24).map { index in
+                        DYAweme(id: "mine-fixture-\(index)", desc: "第 \(index) 条作品", width: 360, height: 480,
+                                duration: 0, play: nil, cover: nil, images: images,
+                                author: .init(name: "测试账号", avatar: nil, secUid: nil),
+                                stats: .init(digg: index, comment: 0, collect: 0, share: 0, play: index * 111),
+                                music: "", userDigged: nil, isCollect: nil)
+                    }
+                }
+                return (items, "0", false)
+            }
             models[k] = model
             Task { await model.loadMore() }
             return
@@ -1836,77 +1855,414 @@ struct DYMineScreen: View {
         Task { await m.loadMore() }
     }
 
-    @ViewBuilder
-    private var header: some View {
-        if let u = user {
-            DYUserHeader(user: u,
-                         onFollowing: { relations = DYRelationsTarget(kind: .following, user: u) },
-                         onFollowers: { relations = DYRelationsTarget(kind: .followers, user: u) })
-        } else if let e = userErr {
-            VStack(spacing: 10) {
-                Text(e.contains("未登录") ? "还没登录抖音" : e).foregroundStyle(Color.primary.opacity(0.8)).font(.subheadline)
-                Button("去登录") { showLogin = true }.buttonStyle(.borderedProminent).tint(.pink)
-                    .accessibilityIdentifier("douyin.mine.login")
+    private func profileScroll(in size: CGSize) -> some View {
+        let margin: CGFloat = size.width >= 570 ? 24 : 14
+        let scrollHeight = max(0, size.height - topPadding)
+        let coverRise = user == nil ? 0 : max(0, min(size.width * 0.29, scrollHeight * 0.28, 164) - 10)
+        let collapseDistance = user == nil ? 0 : coverRise + detailsHeight
+        let detailsAreCovered = collapseDistance > 0 && headerScroll >= collapseDistance - 1
+        let pinnedHeight = identityHeight + tabsHeight
+        // The cover and details occupy normal scroll space. The identity and tabs follow
+        // that same offset until each reaches its pinned position.
+        let identityY = max(0, coverRise - headerScroll)
+        let detailsGap = min(detailsHeight, max(0, collapseDistance - headerScroll))
+        let identityPinned = headerScroll >= coverRise
+        let spacing: CGFloat = 3
+        let columnCount = max(3, min(6, Int((size.width - spacing) / 139)))
+        let columns = Array(repeating: GridItem(.flexible(minimum: 0), spacing: spacing), count: columnCount)
+
+        return ScrollView {
+            VStack(spacing: 0) {
+                Color.clear
+                    .frame(height: coverRise + identityHeight)
+                    .accessibilityHidden(true)
+
+                profileDetails
+                    .padding(.horizontal, margin)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background { Color.ddBackground }
+                    .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { detailsHeight = $0 }
+                    .allowsHitTesting(!detailsAreCovered)
+                    .accessibilityHidden(detailsAreCovered)
+
+                Color.clear.frame(height: tabsHeight)
+                    .accessibilityHidden(true)
+
+                VStack(spacing: 0) {
+                    listHeading
+                    if let model = models[kind] {
+                        DYMineList(model: model, columns: columns, spacing: spacing, showsPlayCount: kind == .post,
+                                   removeTitle: kind == .later ? "移出稍后再看" : nil,
+                                   onRemove: kind == .later ? { item in Task { await removeLater(item, from: model) } } : nil) { index in
+                            open = DYListTarget(title: kind.title, items: model.items, start: index, model: model)
+                        }
+                        .id(kind)
+                    }
+                }
+                .padding(.horizontal, spacing)
+                .padding(.top, spacing)
+                .frame(minHeight: max(0, scrollHeight - pinnedHeight), alignment: .top)
             }
-            .frame(maxWidth: .infinity).padding(.vertical, 12)
+        }
+        .accessibilityIdentifier("douyin.mine.scroll")
+        .scrollPosition($scrollPosition)
+        .scrollBounceBehavior(.basedOnSize)
+        .scrollIndicators(.hidden)
+        .onScrollGeometryChange(for: CGFloat.self) { geometry in
+            min(collapseDistance, geometry.contentOffset.y + geometry.contentInsets.top)
+        } action: { _, offset in
+            headerScroll = offset
+        }
+        .onChange(of: collapseDistance) { _, distance in
+            headerScroll = min(headerScroll, distance)
+        }
+        .overlay(alignment: .top) {
+            VStack(spacing: 0) {
+                identity
+                    .padding(.horizontal, margin)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background {
+                        if identityPinned { Color.ddBackground }
+                    }
+                    .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { identityHeight = $0 }
+                    .accessibilitySortPriority(2)
+
+                Color.clear.frame(height: detailsGap)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+
+                profileTabs
+                    .background(
+                        Color.ddBackground,
+                        in: UnevenRoundedRectangle(bottomLeadingRadius: 15, bottomTrailingRadius: 15)
+                    )
+                    .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { tabsHeight = $0 }
+                    .accessibilitySortPriority(1)
+            }
+            .offset(y: identityY)
+        }
+        .clipped()
+        .padding(.top, topPadding)
+        .background(alignment: .topLeading) {
+            if let user {
+                profileBackdrop(cover: user.cover, viewport: size, coverRise: coverRise)
+            }
+        }
+    }
+
+    private func profileBackdrop(cover: String?, viewport: CGSize, coverRise: CGFloat) -> some View {
+        GeometryReader { backdrop in
+            let statusInset = max(0, backdrop.size.height - viewport.height) + topPadding
+            let width = backdrop.size.width + embeddedRailInset
+            let coverHeight = coverRise + identityHeight + statusInset
+            let coverProgress = min(1, max(0, headerScroll / max(1, coverRise)))
+            let coverOpacity = 1 - coverProgress * coverProgress * (3 - 2 * coverProgress)
+            // Keep the edge beneath the avatar during the drag. At the pin point
+            // the cover has blended into the same surface as the compact header.
+            let coverOffset = min(headerScroll, coverRise)
+            let maskY = max(0, coverHeight - 14 - coverOffset)
+            ZStack(alignment: .top) {
+                DYSelfProfileBackdrop(cover: cover, size: CGSize(width: width, height: coverHeight))
+                    .offset(y: -coverOffset)
+                    .opacity(coverOpacity)
+                UnevenRoundedRectangle(topLeadingRadius: 15, topTrailingRadius: 15)
+                    .fill(Color.ddBackground)
+                    .frame(width: width, height: max(0, backdrop.size.height - maskY))
+                    .offset(y: maskY)
+            }
+            .frame(width: width, height: backdrop.size.height, alignment: .topLeading)
+        }
+        // Decorative pixels extend into the system status region; interactive content uses the viewport.
+        .ignoresSafeArea(.container, edges: [.top, .horizontal])
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var identity: some View {
+        if let user {
+            HStack(spacing: 12) {
+                let avatarWidth = min(avatarSize, 96)
+                CachedAsyncImage(url: user.avatar.flatMap(URL.init(string:)), thumbnailMaxPixel: 288) { image in
+                    image.resizable().scaledToFill()
+                } placeholder: {
+                    Image(systemName: "person.fill")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(width: avatarWidth, height: avatarWidth)
+                .background(scheme == .dark ? Color(white: 0.20) : Color(white: 0.84))
+                .clipShape(Circle())
+                .overlay { Circle().strokeBorder(.white.opacity(0.16), lineWidth: 1) }
+                .accessibilityHidden(true)
+
+                Button { showAccounts = true } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Text(user.name.isEmpty ? "我的" : user.name)
+                                .font(.title3.weight(.semibold))
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        if let douyinID = user.douyinID, !douyinID.isEmpty {
+                            Text("抖音号：\(douyinID)")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    .padding(.bottom, 8)
+                    .frame(minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("切换账号")
+                .accessibilityIdentifier("douyin.mine.accounts")
+            }
+            .padding(.top, 8)
+            .padding(.bottom, 18)
         } else {
-            ProgressView().tint(.primary).frame(height: 80)
+            VStack(spacing: 8) {
+                if let userErr {
+                    Text(userErr.contains("未登录") ? "还没登录抖音" : userErr)
+                        .foregroundStyle(.secondary)
+                        .font(.subheadline)
+                        .multilineTextAlignment(.center)
+                    Button("去登录") { showLogin = true }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.pink)
+                        .accessibilityIdentifier("douyin.mine.login")
+                } else {
+                    ProgressView().tint(.primary)
+                }
+                Button("账号", systemImage: "person.2.circle") { showAccounts = true }
+                    .font(.subheadline)
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("douyin.mine.accounts")
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+        }
+    }
+
+    @ViewBuilder
+    private var profileDetails: some View {
+        if let user {
+            VStack(alignment: .leading, spacing: 6) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 18) { profileStats(user) }
+                    FlowLayout(spacing: 10) { profileStats(user) }
+                }
+                if !user.signature.isEmpty {
+                    Text(user.signature)
+                        .font(.subheadline)
+                        .foregroundStyle(.primary.opacity(0.87))
+                        .lineLimit(2)
+                        .accessibilityIdentifier("douyin.mine.bio")
+                }
+            }
+            .padding(.bottom, 7)
+        }
+    }
+
+    @ViewBuilder
+    private func profileStats(_ user: DYUser) -> some View {
+        profileStat(user.likes, "获赞")
+        profileStat(user.mutualFollows, "互关")
+        Button {
+            relations = DYRelationsTarget(kind: .following, user: user)
+        } label: { profileStat(user.following, "关注").contentShape(Rectangle()) }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("douyin.header.following")
+        Button {
+            relations = DYRelationsTarget(kind: .followers, user: user)
+        } label: { profileStat(user.followers, "粉丝").contentShape(Rectangle()) }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("douyin.header.followers")
+    }
+
+    private func profileStat(_ value: Int?, _ label: String) -> some View {
+        HStack(spacing: 4) {
+            Text(value.map(DYFormat.count) ?? "—").fontWeight(.semibold).monospacedDigit()
+            Text(label).foregroundStyle(.secondary)
+        }
+        .font(.subheadline)
+        .fixedSize(horizontal: true, vertical: false)
+        .frame(minHeight: 44)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var profileTabs: some View {
+        HStack(spacing: 4) {
+            ForEach(DYListKind.profileTabs) { tab in
+                Button { kind = tab } label: {
+                    Text(tab.title)
+                        .font(.subheadline.weight(kind == tab ? .semibold : .medium))
+                        .foregroundStyle(kind == tab ? Color.primary : Color.secondary)
+                        .padding(.horizontal, 9)
+                        .frame(minWidth: 55, minHeight: 44)
+                        .overlay(alignment: .bottom) {
+                            Capsule().fill(tabAccent)
+                                .frame(width: 28, height: 3)
+                                .padding(.bottom, 4)
+                                .opacity(kind == tab ? 1 : 0)
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(kind == tab ? .isSelected : [])
+                .accessibilityIdentifier("douyin.mine.\(tab.rawValue)")
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: kind)
+    }
+
+    @ViewBuilder
+    private var listHeading: some View {
+        if DYListKind.profileShortcuts.contains(kind) || manageMsg != nil {
+            HStack(spacing: 10) {
+                Text(kind.title).font(.subheadline.weight(.semibold))
+                    .accessibilityIdentifier("douyin.mine.listHeading")
+                if let manageMsg {
+                    Text(manageMsg).font(.caption).foregroundStyle(.orange).lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                if kind == .history {
+                    Button(clearingHistory ? "清空中…" : "清空历史", systemImage: "trash") { confirmClearHistory = true }
+                        .font(.caption)
+                        .disabled(clearingHistory)
+                        .accessibilityIdentifier("douyin.mine.history.clear")
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         }
     }
 }
 
 private struct DYMineList: View {
     @ObservedObject var model: DYPagedModel
-    var showsPlayCount = false
-    var removeTitle: String? = nil
-    var onRemove: ((DYAweme) -> Void)? = nil
+    let columns: [GridItem]
+    let spacing: CGFloat
+    let showsPlayCount: Bool
+    let removeTitle: String?
+    let onRemove: ((DYAweme) -> Void)?
     let onOpen: (Int) -> Void
+
     var body: some View {
         DYGrid(items: model.items, hasMore: model.hasMore, loading: model.loading, error: model.error,
                onLoadMore: { Task { await model.loadMore() } }, onOpen: onOpen, showsPlayCount: showsPlayCount,
                removeTitle: removeTitle, onRemove: onRemove)
+            .rows(columns: columns, spacing: spacing)
     }
 }
 
-/// 「我的」页顶部封面。没有 URL、URL 无效或图片失败时不画这层，页面仍是原来的黑底。
+@available(iOS 27.1, *)
+private struct DYMineToolbarShortcuts: View {
+    @Environment(\.toolbarVerticalEdge) private var verticalEdge
+    let selection: DYListKind
+    let select: (DYListKind) -> Void
+
+    var body: some View {
+        DYMineShortcuts(vertical: verticalEdge != nil, selection: selection, select: select)
+    }
+}
+
+struct DYMineShortcuts: View {
+    let vertical: Bool
+    var selection: DYListKind? = nil
+    let select: (DYListKind) -> Void
+
+    var body: some View {
+        let layout = vertical ? AnyLayout(VStackLayout(spacing: 4)) : AnyLayout(HStackLayout(spacing: 6))
+        layout {
+            ForEach(DYListKind.profileShortcuts) { shortcut in
+                Button { select(shortcut) } label: {
+                    VStack(spacing: 2) {
+                        shortcutIcon(shortcut)
+                            .frame(width: 24, height: 24)
+                            .accessibilityHidden(true)
+                        Text(shortcut.title)
+                            .font(.caption2.weight(.medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.65)
+                    }
+                    .foregroundStyle(Color.primary)
+                    .padding(.horizontal, 2)
+                    .frame(width: 46, height: 44)
+                    .background(Color.primary.opacity(selection == shortcut ? 0.12 : 0), in: .capsule)
+                    .contentShape(Rectangle())
+                }
+                .accessibilityLabel(shortcut.title)
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selection == shortcut ? .isSelected : [])
+                .accessibilityIdentifier("douyin.mine.\(shortcut.rawValue)")
+            }
+        }
+        .padding(4)
+        .glassEffect(.regular, in: .capsule)
+    }
+
+    @ViewBuilder
+    private func shortcutIcon(_ shortcut: DYListKind) -> some View {
+        if shortcut == .history {
+            Image(systemName: "clock")
+                .font(.system(size: 22, weight: .medium))
+        } else {
+            ZStack(alignment: .bottomTrailing) {
+                Image(systemName: "rectangle.portrait")
+                    .font(.system(size: 20, weight: .medium))
+                    .overlay {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 8, weight: .semibold))
+                    }
+                    .padding(.trailing, 4)
+                    .padding(.bottom, 2)
+                    .mask {
+                        Rectangle()
+                            .overlay(alignment: .bottomTrailing) {
+                                Circle().frame(width: 14, height: 14)
+                                    .blendMode(.destinationOut)
+                            }
+                            .compositingGroup()
+                    }
+                Image(systemName: "clock")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+        }
+    }
+}
+
+/// A bounded, cropped cover keeps wide images out of the Duo's rail.
 private struct DYSelfProfileBackdrop: View {
+    @Environment(\.colorScheme) private var scheme
     let cover: String?
+    let size: CGSize
 
     private var url: URL? {
-        guard let cover, !cover.isEmpty, let url = URL(string: cover),
-              let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http" else { return nil }
+        guard let cover, let url = URL(string: cover), let scheme = url.scheme?.lowercased(),
+              scheme == "https" || scheme == "http" else { return nil }
         return url
     }
 
     var body: some View {
-        if let url {
-            // 宽度写死为容器宽度：以前 scaledToFill 后接 .frame(maxWidth: .infinity)，
-            // 封面比例比容器宽时这个框会按图片自身宽度撑开（居中），clipped 只裁到撑开后的框，
-            // 右边就画出容器、盖到右侧栏那一列（合屏时最明显）。顶部仍延伸到状态栏。
-            GeometryReader { geo in
-                let inset = geo.safeAreaInsets
-                let width = max(0, geo.size.width - inset.leading - inset.trailing)
-                CachedAsyncImage(url: url, thumbnailMaxPixel: 1600) { image in
+        let base = scheme == .dark ? Color(white: 0.14) : Color(white: 0.92)
+        base
+            .frame(width: size.width, height: size.height)
+            .overlay {
+                CachedAsyncImage(url: url, thumbnailMaxPixel: 1800) { image in
                     image.resizable().scaledToFill()
-                        .frame(width: width, height: 240)
-                        .clipped()
-                        .overlay {
-                            LinearGradient(
-                                colors: [.ddBackground.opacity(0.88), .ddBackground.opacity(0.72), .ddBackground],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        }
-                } placeholder: {
-                    Color.clear
-                }
-                .frame(width: width, height: 240)
-                .padding(.leading, inset.leading)
+                } placeholder: { Color.clear }
             }
-            .ignoresSafeArea(edges: .top)
-            .allowsHitTesting(false)
+            .clipped()
+            .overlay {
+                LinearGradient(colors: [.clear, base.opacity(0.8)], startPoint: .center, endPoint: .bottom)
+            }
             .accessibilityHidden(true)
-        }
     }
 }
 
@@ -2417,34 +2773,3 @@ extension ToolbarContent {
         else { self }
     }
 }
-
-
-
-#if DEBUG
-private struct DYSelfProfileBackdropPreview: View {
-    let cover: String?
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            DYUserHeader(user: DYUser(
-                name: "预览", avatar: nil, signature: "封面预览",
-                secUid: "preview", uid: "0", followers: 12, following: 3,
-                likes: 40, works: 5, ip: nil, cover: cover))
-                .padding(16)
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(alignment: .top) { DYSelfProfileBackdrop(cover: cover) }
-        .background(Color.ddBackground)
-    }
-}
-
-#Preview("无封面") {
-    DYSelfProfileBackdropPreview(cover: nil)
-
-}
-
-#Preview("无效地址") {
-    DYSelfProfileBackdropPreview(cover: "not a url")
-
-}
-#endif

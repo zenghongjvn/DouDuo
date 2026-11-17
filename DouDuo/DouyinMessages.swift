@@ -529,6 +529,7 @@ struct DYMessagesScreen: View {
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("douyin.messages.root")
                     .modifier(DYSystemTabBar(hidden: !sidebarVisible && navigation.hasDetail && !keepsSharedChatDock))
+                    .dyMineStatusBarVisible(showingMine)
                     .ignoresSafeArea(.container, edges: keepsSharedChatDock ? [.top] : [.top, .bottom])
                     .navigationTitle("")
                     .navigationBarTitleDisplayMode(.inline)
@@ -771,12 +772,13 @@ struct DYMessagesScreen: View {
                             .padding(edge == .leading ? .leading : .trailing, reserve)
                             .opacity(showingMine ? 0 : 1)
                             .allowsHitTesting(!showingMine)
+                            .accessibilityHidden(showingMine)
                         if showingMine, let mineContent {
-                            // 外层整页忽略了顶部安全区；「我的」自带导航栏，内容要让开状态栏 + 导航栏，
-                            // 否则页头（含「去登录」）被导航栏盖住、点不到（老板 2026-11-17「点击登录无反应」）。
+                            // The profile uses these insets to extend its cover behind the rail and keep its controls in the viewport.
                             mineContent
-                                .safeAreaPadding(.top, messageTopInset)
-                                .padding(edge == .leading ? .leading : .trailing, reserve)
+                                .environment(\.dyMineTopInset, messageTopInset)
+                                .environment(\.dyMineRailInset, reserve)
+                                .padding(.trailing, reserve)
                                 .transition(.opacity)
                         }
                         messageRail
@@ -891,8 +893,7 @@ struct DYMessagesScreen: View {
                 .accessibilityLabel("返回")
                 .accessibilityIdentifier(!showingMine && navigation.hasDetail ? "douyin.messages.back" : "douyin.messages.close")
             }
-            // 四个分类 + 聊天时的「更多」只属于信息页；「我的」页把这组隐藏着占位、「账号」放在同一位置，
-            // 两页栏高一样，返回键不会上下跳
+            // 「我的」复用分类区域的高度，切换时返回键留在同一位置。
             if !showingMine {
                 VStack(spacing: theme.media.actionItemSpacing) {
                     railItem(.interactive, icon: "heart", title: "互动",
@@ -906,16 +907,11 @@ struct DYMessagesScreen: View {
                 .frame(width: Self.railWidth)
                 .glassEffect(.regular, in: .capsule)
             } else {
-                // 「我的」页：「账号」放在分类组的位置，整组高度跟信息页四个分类一样（空着占位），
-                // 两页栏高一致，返回键不上下跳
-                VStack(spacing: theme.media.actionItemSpacing) {
-                    railButton(icon: "person.2.circle", title: "账号", selected: false, badge: 0,
-                               id: "douyin.mine.accounts") { NotificationCenter.default.post(name: .dyOpenAccounts, object: nil) }
-                    .glassEffect(.regular, in: .capsule)
-                    Spacer(minLength: 0)
+                DYMineShortcuts(vertical: true) { shortcut in
+                    NotificationCenter.default.post(name: .dyOpenMineShortcut, object: shortcut)
                 }
-                .padding(.vertical, 8)
-                .frame(width: Self.railWidth, height: 48 * 4 + theme.media.actionItemSpacing * 3 + 16)
+                .padding(.top, 8)
+                .frame(width: Self.railWidth, height: 48 * 4 + theme.media.actionItemSpacing * 3 + 16, alignment: .top)
             }
             // 我的：直接进「我的」
             if mineContent != nil || (onMine != nil && chromeModeRaw != DDChromeMode.duoClassic.rawValue) {
