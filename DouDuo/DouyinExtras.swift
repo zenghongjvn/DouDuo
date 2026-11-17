@@ -72,11 +72,6 @@ struct DYSug: Identifiable, Decodable, Equatable {
     let word: String
 }
 
-extension Notification.Name {
-    /// 信息页托管「我的」时，沿用外层的右侧栏。
-    static let dyOpenMineShortcut = Notification.Name("douduo.openMineShortcut")
-}
-
 enum DYListKind: String, CaseIterable, Identifiable {
     case post, like, collect, history, later
     static let profileTabs: [Self] = [.post, .like, .collect]
@@ -89,7 +84,7 @@ enum DYListKind: String, CaseIterable, Identifiable {
         case .like: "喜欢"
         case .collect: "收藏"
         case .history: "历史"
-        case .later: "稍后再看"
+        case .later: "稍后看"
         }
     }
 }
@@ -1582,6 +1577,7 @@ struct FlowLayout: Layout {
 // MARK: - 我的
 
 extension EnvironmentValues {
+    @Entry var dyMineShortcutRoute: Binding<DYListKind?>? = nil
     @Entry var dyMineTopInset: CGFloat = 0
     @Entry var dyMineRailInset: CGFloat = 0
 }
@@ -1604,6 +1600,9 @@ struct DYMineScreen: View {
     @Environment(\.dyMineTopInset) private var embeddedTopInset
     @Environment(\.dyMineRailInset) private var embeddedRailInset
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dyMineShortcutRoute) private var embeddedRoute
+    @ScaledMetric(relativeTo: .title) private var nameSize = 27.0
+    @ScaledMetric(relativeTo: .caption) private var handleSize = 13.0
     @ScaledMetric(relativeTo: .title3) private var avatarSize = 64.0
     @AppStorage(DDChromeMode.key) private var chromeModeRaw = DDChromeMode.classic.rawValue
     let bridge: DouyinBridge
@@ -1626,7 +1625,14 @@ struct DYMineScreen: View {
     @State private var showAccounts = false
     @State private var scrollPosition = ScrollPosition()
     @State private var headerScroll: CGFloat = 0
-    @State private var identityHeight: CGFloat = 90
+    @State private var signedOutHeight: CGFloat = 90
+    @State private var localShortcut: DYListKind?
+    private var shortcutRoute: Binding<DYListKind?> { embeddedRoute ?? $localShortcut }
+    private var avatarWidth: CGFloat { min(avatarSize, 96) }
+    private var compactHeight: CGFloat { user == nil ? signedOutHeight : max(44, nameSize * 1.15 + 8) }
+    private var identityHeight: CGFloat {
+        user == nil ? signedOutHeight : max(avatarWidth, nameSize * 1.3 + handleSize * 1.3 + 4) + 26
+    }
     @State private var detailsHeight: CGFloat = 0
     @State private var tabsHeight: CGFloat = 44
 
@@ -1664,21 +1670,25 @@ struct DYMineScreen: View {
                         }
                         if #available(iOS 27.1, *) {
                             ToolbarItem(placement: .bottomBar) {
-                                DYMineToolbarShortcuts(selection: kind) { kind = $0 }
+                                DYMineToolbarShortcuts { shortcutRoute.wrappedValue = $0 }
                             }
                             .sharedBackgroundVisibility(.hidden)
                             .axisBehavior(.verticalPreferred)
                             .visibilityPriority(.high)
                         } else {
                             ToolbarItem(placement: .primaryAction) {
-                                DYMineShortcuts(vertical: false, selection: kind) { kind = $0 }
+                                DYMineShortcuts(vertical: false) { shortcutRoute.wrappedValue = $0 }
                             }
                         }
                     }
                 }
+                .navigationDestination(item: shortcutRoute) { shortcut in
+                    shortcutPage(shortcut)
+                }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .dyOpenMineShortcut)) { note in
-            if embedded, let shortcut = note.object as? DYListKind { kind = shortcut }
+        .fullScreenCover(item: $open) { t in
+            DYListPlayer(bridge: bridge, title: t.title, playback: t.playback,
+                         loadMore: t.model.map { m in { await m.loadMore() } }, onAuthor: onAuthor, presentsAuthor: true)
         }
         .sheet(isPresented: $showAccounts) {
             DYAccountsScreen(onChanged: { Task { await accountChanged() } },
@@ -1736,6 +1746,7 @@ struct DYMineScreen: View {
         .ignoresSafeArea(.container, edges: usesFullHeight ? .top : [])
         .background(Color.ddBackground.ignoresSafeArea())
         .task {
+            guard user == nil else { return }
             #if DEBUG
             if ProcessInfo.processInfo.environment["DOUDUO_SELF_FIXTURE"] == "1" {
                 await loadSelf()
@@ -1777,14 +1788,6 @@ struct DYMineScreen: View {
             manageMsg = nil
             ensure(k)
             scrollPosition.scrollTo(y: max(0, headerScroll))
-        }
-        .alert("清空观看历史？", isPresented: $confirmClearHistory) {
-            Button("清空", role: .destructive) { Task { await clearHistory() } }
-            Button("取消", role: .cancel) {}
-        } message: { Text("清空后找不回来。") }
-        .fullScreenCover(item: $open) { t in
-            DYListPlayer(bridge: bridge, title: t.title, playback: t.playback,
-                         loadMore: t.model.map { m in { await m.loadMore() } }, onAuthor: onAuthor, presentsAuthor: true)
         }
         .fullScreenCover(item: $relations) { t in
             DYRelationsScreen(bridge: bridge, kind: t.kind, uid: t.user.uid, secUid: t.user.secUid, manageFollowers: true)
@@ -1859,18 +1862,17 @@ struct DYMineScreen: View {
         let margin: CGFloat = size.width >= 570 ? 24 : 14
         let scrollHeight = max(0, size.height - topPadding)
         let coverRise = user == nil ? 0 : max(0, min(size.width * 0.29, scrollHeight * 0.28, 164) - 10)
-        let collapseDistance = user == nil ? 0 : coverRise + detailsHeight
+        let collapseDistance = user == nil ? 0 : coverRise + detailsHeight + identityHeight - compactHeight
+        let progress = min(1, max(0, (headerScroll - coverRise * 0.45) / max(1, collapseDistance - coverRise * 0.45)))
+        let rowHeight = identityHeight + (compactHeight - identityHeight) * progress
         let detailsAreCovered = collapseDistance > 0 && headerScroll >= collapseDistance - 1
-        let pinnedHeight = identityHeight + tabsHeight
+        let pinnedHeight = compactHeight + tabsHeight
         // The cover and details occupy normal scroll space. The identity and tabs follow
         // that same offset until each reaches its pinned position.
         let identityY = max(0, coverRise - headerScroll)
-        let detailsGap = min(detailsHeight, max(0, collapseDistance - headerScroll))
+        let detailsGap = max(0, coverRise + identityHeight + detailsHeight - headerScroll - identityY - rowHeight)
         let identityPinned = headerScroll >= coverRise
         let spacing: CGFloat = 3
-        let columnCount = max(3, min(6, Int((size.width - spacing) / 139)))
-        let columns = Array(repeating: GridItem(.flexible(minimum: 0), spacing: spacing), count: columnCount)
-
         return ScrollView {
             VStack(spacing: 0) {
                 Color.clear
@@ -1888,28 +1890,18 @@ struct DYMineScreen: View {
                 Color.clear.frame(height: tabsHeight)
                     .accessibilityHidden(true)
 
-                VStack(spacing: 0) {
-                    listHeading
-                    if let model = models[kind] {
-                        DYMineList(model: model, columns: columns, spacing: spacing, showsPlayCount: kind == .post,
-                                   removeTitle: kind == .later ? "移出稍后再看" : nil,
-                                   onRemove: kind == .later ? { item in Task { await removeLater(item, from: model) } } : nil) { index in
-                            open = DYListTarget(title: kind.title, items: model.items, start: index, model: model)
-                        }
-                        .id(kind)
-                    }
-                }
+                list(for: kind, width: size.width, spacing: spacing)
                 .padding(.horizontal, spacing)
                 .padding(.top, spacing)
                 .frame(minHeight: max(0, scrollHeight - pinnedHeight), alignment: .top)
             }
+            .background { DYProfileScrollBounds().allowsHitTesting(false) }
         }
         .accessibilityIdentifier("douyin.mine.scroll")
         .scrollPosition($scrollPosition)
-        .scrollBounceBehavior(.basedOnSize)
         .scrollIndicators(.hidden)
         .onScrollGeometryChange(for: CGFloat.self) { geometry in
-            min(collapseDistance, geometry.contentOffset.y + geometry.contentInsets.top)
+            min(collapseDistance, max(0, geometry.contentOffset.y + geometry.contentInsets.top))
         } action: { _, offset in
             headerScroll = offset
         }
@@ -1918,13 +1910,13 @@ struct DYMineScreen: View {
         }
         .overlay(alignment: .top) {
             VStack(spacing: 0) {
-                identity
+                identity(progress: progress)
                     .padding(.horizontal, margin)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background {
                         if identityPinned { Color.ddBackground }
                     }
-                    .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { identityHeight = $0 }
+                    .frame(height: rowHeight, alignment: .top)
                     .accessibilitySortPriority(2)
 
                 Color.clear.frame(height: detailsGap)
@@ -1932,10 +1924,7 @@ struct DYMineScreen: View {
                     .accessibilityHidden(true)
 
                 profileTabs
-                    .background(
-                        Color.ddBackground,
-                        in: UnevenRoundedRectangle(bottomLeadingRadius: 15, bottomTrailingRadius: 15)
-                    )
+                    .background(Color.ddBackground)
                     .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { tabsHeight = $0 }
                     .accessibilitySortPriority(1)
             }
@@ -1979,10 +1968,12 @@ struct DYMineScreen: View {
     }
 
     @ViewBuilder
-    private var identity: some View {
+    private func identity(progress: CGFloat) -> some View {
         if let user {
-            HStack(spacing: 12) {
-                let avatarWidth = min(avatarSize, 96)
+            let expanded = 1 - progress
+            let titleSize = nameSize * (1 - 0.18 * progress)
+            let leading = (avatarWidth + 12) * expanded
+            ZStack(alignment: .leading) {
                 CachedAsyncImage(url: user.avatar.flatMap(URL.init(string:)), thumbnailMaxPixel: 288) { image in
                     image.resizable().scaledToFill()
                 } placeholder: {
@@ -1994,14 +1985,14 @@ struct DYMineScreen: View {
                 .background(scheme == .dark ? Color(white: 0.20) : Color(white: 0.84))
                 .clipShape(Circle())
                 .overlay { Circle().strokeBorder(.white.opacity(0.16), lineWidth: 1) }
-                .offset(y: -4)
+                .offset(x: -(avatarWidth + 12) * progress, y: -4 - 8 * progress)
                 .accessibilityHidden(true)
 
                 Button { showAccounts = true } label: {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 4 * expanded) {
                         HStack(spacing: 6) {
                             Text(user.name.isEmpty ? "我的" : user.name)
-                                .font(.title3.weight(.semibold))
+                                .font(.system(size: titleSize, weight: .bold))
                                 .lineLimit(1)
                             Image(systemName: "chevron.down")
                                 .font(.caption.weight(.semibold))
@@ -2009,22 +2000,27 @@ struct DYMineScreen: View {
                         }
                         if let douyinID = user.douyinID, !douyinID.isEmpty {
                             Text("抖音号：\(douyinID)")
-                                .font(.subheadline)
+                                .font(.system(size: handleSize))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
+                                .frame(height: handleSize * 1.35 * expanded)
+                                .clipped()
+                                .opacity(expanded)
+                                .accessibilityHidden(progress >= 1)
                         }
                     }
-                    .padding(.bottom, 8)
                     .frame(minHeight: 44, alignment: .leading)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .padding(.leading, leading)
                 .accessibilityHint("切换账号")
                 .accessibilityIdentifier("douyin.mine.accounts")
             }
-            .padding(.top, 8)
-            .padding(.bottom, 18)
+            .frame(height: identityHeight + (compactHeight - identityHeight) * progress)
+            .offset(y: -5 * expanded)
+            .clipped()
         } else {
             VStack(spacing: 8) {
                 if let userErr {
@@ -2046,6 +2042,7 @@ struct DYMineScreen: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
+            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { signedOutHeight = $0 }
         }
     }
 
@@ -2053,10 +2050,8 @@ struct DYMineScreen: View {
     private var profileDetails: some View {
         if let user {
             VStack(alignment: .leading, spacing: 6) {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 18) { profileStats(user) }
-                    FlowLayout(spacing: 10) { profileStats(user) }
-                }
+                HStack(spacing: 8) { profileStats(user) }
+                    .frame(maxWidth: 480, alignment: .leading)
                 if !user.signature.isEmpty {
                     Text(user.signature)
                         .font(.subheadline)
@@ -2086,13 +2081,13 @@ struct DYMineScreen: View {
     }
 
     private func profileStat(_ value: Int?, _ label: String) -> some View {
-        HStack(spacing: 4) {
-            Text(value.map(DYFormat.count) ?? "—").fontWeight(.semibold).monospacedDigit()
-            Text(label).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value.map(DYFormat.count) ?? "—")
+                .font(.title3.weight(.bold)).monospacedDigit()
+                .lineLimit(1).minimumScaleFactor(0.75)
+            Text(label).font(.caption).foregroundStyle(.secondary)
         }
-        .font(.subheadline)
-        .fixedSize(horizontal: true, vertical: false)
-        .frame(minHeight: 44)
+        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
 
@@ -2123,26 +2118,72 @@ struct DYMineScreen: View {
     }
 
     @ViewBuilder
-    private var listHeading: some View {
-        if DYListKind.profileShortcuts.contains(kind) || manageMsg != nil {
-            HStack(spacing: 10) {
-                Text(kind.title).font(.subheadline.weight(.semibold))
-                    .accessibilityIdentifier("douyin.mine.listHeading")
-                if let manageMsg {
-                    Text(manageMsg).font(.caption).foregroundStyle(.orange).lineLimit(2)
-                }
-                Spacer(minLength: 0)
-                if kind == .history {
-                    Button(clearingHistory ? "清空中…" : "清空历史", systemImage: "trash") { confirmClearHistory = true }
-                        .font(.caption)
+    private func list(for category: DYListKind, width: CGFloat, spacing: CGFloat) -> some View {
+        if let model = models[category] {
+            let count = max(3, min(6, Int((width - spacing) / 139)))
+            let columns = Array(repeating: GridItem(.flexible(minimum: 0), spacing: spacing), count: count)
+            DYMineList(model: model, columns: columns, spacing: spacing, showsPlayCount: category == .post,
+                       removeTitle: category == .later ? "移出稍后看" : nil,
+                       onRemove: category == .later ? { item in Task { await removeLater(item, from: model) } } : nil) { index in
+                open = DYListTarget(title: category.title, items: model.items, start: index, model: model)
+            }
+            .id(category)
+        }
+    }
+
+    private func shortcutPage(_ shortcut: DYListKind) -> some View {
+        GeometryReader { geo in
+            ScrollView {
+                if let manageMsg { Text(manageMsg).font(.footnote).foregroundStyle(.secondary) }
+                list(for: shortcut, width: geo.size.width, spacing: 3)
+                    .padding(.horizontal, 3)
+            }
+        }
+        .background(Color.ddBackground.ignoresSafeArea())
+        .navigationTitle(shortcut.title)
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+        .toolbar(.visible, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button("返回", systemImage: "chevron.backward") { shortcutRoute.wrappedValue = nil }
+                    .accessibilityIdentifier("douyin.mine.shortcut.back")
+            }
+            if shortcut == .history {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("清空历史", systemImage: "trash") { confirmClearHistory = true }
                         .disabled(clearingHistory)
                         .accessibilityIdentifier("douyin.mine.history.clear")
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+        }
+        .dyEdgeBack { shortcutRoute.wrappedValue = nil }
+        .onAppear { manageMsg = nil; ensure(shortcut) }
+        .alert("清空观看历史？", isPresented: $confirmClearHistory) {
+            Button("清空", role: .destructive) { Task { await clearHistory() } }
+            Button("取消", role: .cancel) {}
+        } message: { Text("清空后找不回来。") }
+    }
+}
+
+/// SwiftUI's size-based bounce still stretches long lists. Limit this to the profile scroll view.
+private struct DYProfileScrollBounds: UIViewRepresentable {
+    final class Probe: UIView {
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else { return }
+            var ancestor = superview
+            while let view = ancestor {
+                if let scroll = view as? UIScrollView {
+                    scroll.bouncesVertically = false
+                    return
+                }
+                ancestor = view.superview
+            }
         }
     }
+    func makeUIView(context: Context) -> Probe { Probe() }
+    func updateUIView(_ uiView: Probe, context: Context) {}
 }
 
 private struct DYMineList: View {
@@ -2165,54 +2206,31 @@ private struct DYMineList: View {
 @available(iOS 27.1, *)
 private struct DYMineToolbarShortcuts: View {
     @Environment(\.toolbarVerticalEdge) private var verticalEdge
-    let selection: DYListKind
     let select: (DYListKind) -> Void
 
     var body: some View {
-        DYMineShortcuts(vertical: verticalEdge != nil, selection: selection, select: select)
+        DYMineShortcuts(vertical: verticalEdge != nil, select: select)
     }
 }
 
 struct DYMineShortcuts: View {
     let vertical: Bool
-    var selection: DYListKind? = nil
     let select: (DYListKind) -> Void
 
     var body: some View {
-        let layout = vertical ? AnyLayout(VStackLayout(spacing: 4)) : AnyLayout(HStackLayout(spacing: 6))
-        layout {
+        DYInteractionRail(vertical: vertical) {
             ForEach(DYListKind.profileShortcuts) { shortcut in
-                Button { select(shortcut) } label: {
-                    VStack(spacing: 2) {
-                        shortcutIcon(shortcut)
-                            .frame(width: 24, height: 24)
-                            .accessibilityHidden(true)
-                        Text(shortcut.title)
-                            .font(.caption2.weight(.medium))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.65)
-                    }
-                    .foregroundStyle(Color.primary)
-                    .padding(.horizontal, 2)
-                    .frame(width: 46, height: 44)
-                    .background(Color.primary.opacity(selection == shortcut ? 0.12 : 0), in: .capsule)
-                    .contentShape(Rectangle())
-                }
-                .accessibilityLabel(shortcut.title)
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(selection == shortcut ? .isSelected : [])
-                .accessibilityIdentifier("douyin.mine.\(shortcut.rawValue)")
+                DYInteractionRailButton(title: shortcut.title, id: "douyin.mine.\(shortcut.rawValue)") {
+                    select(shortcut)
+                } icon: { shortcutIcon(shortcut) }
             }
         }
-        .padding(4)
-        .glassEffect(.regular, in: .capsule)
     }
 
     @ViewBuilder
     private func shortcutIcon(_ shortcut: DYListKind) -> some View {
         if shortcut == .history {
             Image(systemName: "clock")
-                .font(.system(size: 22, weight: .medium))
         } else {
             ZStack(alignment: .bottomTrailing) {
                 Image(systemName: "rectangle.portrait")

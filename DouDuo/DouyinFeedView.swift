@@ -3781,7 +3781,7 @@ struct DYUpstreamVideoPage: View {
         Task {
             do {
                 switch try await bridge.addWatchLater(item.id) {
-                case .ok: onToast?("已加入稍后再看")
+                case .ok: onToast?("已加入稍后看")
                 case .notLoggedIn: onToast?("抖音未登录")
                 case .failed(let why): onToast?("没加进去：" + why)
                 }
@@ -4002,7 +4002,7 @@ struct DYUpstreamVideoPage: View {
                     .accessibilityIdentifier("douyin.quick.autonext")
             }
             if bridge != nil {
-                Button("稍后再看", systemImage: "clock") { addWatchLater() }
+                Button("稍后看", systemImage: "clock") { addWatchLater() }
                     .accessibilityIdentifier("douyin.watchlater.add")
             }
             if item.images.isEmpty, bridge != nil {
@@ -4294,7 +4294,7 @@ struct DYClassicVideoPage: View {
         Task {
             do {
                 switch try await bridge.addWatchLater(item.id) {
-                case .ok: onToast?("已加入稍后再看")
+                case .ok: onToast?("已加入稍后看")
                 case .notLoggedIn: onToast?("抖音未登录")
                 case .failed(let why): onToast?("没加进去：" + why)
                 }

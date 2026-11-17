@@ -91,7 +91,7 @@ struct DYVideoOptionsPanel: View {
                         }
                         if let onWatchLater {
                             Divider().padding(.leading, 16)
-                            Button("稍后再看", systemImage: "clock") {
+                            Button("稍后看", systemImage: "clock") {
                                 dismiss()
                                 onWatchLater()
                             }

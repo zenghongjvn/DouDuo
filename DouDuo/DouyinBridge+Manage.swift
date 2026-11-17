@@ -36,7 +36,7 @@ extension DouyinBridge {
     /// 加入稍后再看（POST watchlater/upsert，action_type 1）。
     func addWatchLater(_ awemeID: String) async throws -> DYActionResult {
         let r = try await manage(Self.watchLaterAddJS, ["id": awemeID], tag: "watchlater-add")
-        if r.status == 200, r.statusCode == 4 { return .failed("稍后再看已达上限") }
+        if r.status == 200, r.statusCode == 4 { return .failed("稍后看已达上限") }
         return Self.manageResult(r)
     }
 

@@ -425,6 +425,73 @@ enum DYNoticeKind {
 
 // MARK: - 根页
 
+enum DYInteractionRailMetrics {
+    static let width: CGFloat = 54
+}
+
+struct DYInteractionRail<Content: View>: View {
+    @Environment(\.appTheme) private var theme
+    let vertical: Bool
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        let spacing = theme.media.actionItemSpacing
+        let layout = vertical ? AnyLayout(VStackLayout(spacing: spacing)) : AnyLayout(HStackLayout(spacing: spacing))
+        layout { content() }
+            .padding(vertical ? .vertical : .horizontal, 8)
+            .glassEffect(.regular, in: .capsule)
+    }
+}
+
+struct DYInteractionRailButton<Icon: View>: View {
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var scheme
+    let title: String
+    let id: String
+    var selected = false
+    var badge = 0
+    var dot = false
+    let action: () -> Void
+    @ViewBuilder let icon: () -> Icon
+
+    var body: some View {
+        let tint = selected ? theme.accent.color(for: scheme) : Color.primary
+        Button(action: action) {
+            VStack(spacing: 2) {
+                icon()
+                    .font(.system(size: 23, weight: .regular, design: .rounded))
+                    .foregroundStyle(tint)
+                    .frame(width: 34, height: 30)
+                    .overlay(alignment: .topTrailing) {
+                        if badge > 0 {
+                            Text(badge > 99 ? "99+" : String(badge))
+                                .font(.system(size: 9, weight: .bold)).monospacedDigit()
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 4).padding(.vertical, 1.5)
+                                .background(theme.status.danger.color(for: scheme), in: .capsule)
+                                .offset(x: 8, y: -3)
+                        } else if dot {
+                            Circle().fill(theme.status.danger.color(for: scheme))
+                                .frame(width: 8, height: 8)
+                                .offset(x: 2, y: 1)
+                                .accessibilityIdentifier(id + ".dot")
+                        }
+                    }
+                Text(title).font(.caption2.weight(.medium))
+                    .foregroundStyle(selected ? tint : Color.secondary)
+                    .lineLimit(1).minimumScaleFactor(0.7)
+            }
+            .frame(width: DYInteractionRailMetrics.width, height: 48)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(badge > 0 ? "\(badge) 条未读" : (dot ? "有未读" : ""))
+        .accessibilityIdentifier(id)
+    }
+
+}
+
 struct DYMessagesScreen: View {
     @Environment(\.dismiss) private var dismissRoot
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -440,6 +507,7 @@ struct DYMessagesScreen: View {
     /// 打开时先显示哪一页：点「我的」进来就是「我的」，点「信息」进来就是信息（老板 2026-11-17）
     var startsOnMine = false
     @State private var showingMine = false
+    @State private var mineShortcut: DYListKind?
     let onWeb: (URL) -> Void
     var forwardedShare: DYForwardReceipt? = nil
 
@@ -776,15 +844,18 @@ struct DYMessagesScreen: View {
                         if showingMine, let mineContent {
                             // The profile uses these insets to extend its cover behind the rail and keep its controls in the viewport.
                             mineContent
+                                .environment(\.dyMineShortcutRoute, $mineShortcut)
                                 .environment(\.dyMineTopInset, messageTopInset)
                                 .environment(\.dyMineRailInset, reserve)
-                                .padding(.trailing, reserve)
+                                .padding(.trailing, mineShortcut == nil ? reserve : 0)
                                 .transition(.opacity)
                         }
-                        messageRail
-                            .padding(.horizontal, outer)
-                            .frame(maxWidth: .infinity, alignment: edge == .leading ? .leading : .trailing)
-                            .ignoresSafeArea(edges: .horizontal)
+                        if mineShortcut == nil {
+                            messageRail
+                                .padding(.horizontal, outer)
+                                .frame(maxWidth: .infinity, alignment: edge == .leading ? .leading : .trailing)
+                                .ignoresSafeArea(edges: .horizontal)
+                        }
                     }
                 }
             }
@@ -870,7 +941,7 @@ struct DYMessagesScreen: View {
 
     // MARK: 右侧栏（样式、宽度、底部位置照搬视频页右侧栏：54pt 玻璃胶囊、27pt 线框图标、下方小字）
 
-    private static let railWidth: CGFloat = 54
+    private static let railWidth = DYInteractionRailMetrics.width
 
     private var messageRail: some View {
         VStack(spacing: theme.media.actionGroupSpacing) {
@@ -895,21 +966,9 @@ struct DYMessagesScreen: View {
             }
             // 「我的」复用分类区域的高度，切换时返回键留在同一位置。
             if !showingMine {
-                VStack(spacing: theme.media.actionItemSpacing) {
-                    railItem(.interactive, icon: "heart", title: "互动",
-                             badge: (counts[DYNoticeGroup.comment.rawValue] ?? 0) + (counts[DYNoticeGroup.digg.rawValue] ?? 0))
-                    railItem(.fans, icon: "person", title: "粉丝", badge: counts[DYNoticeGroup.fans.rawValue] ?? 0)
-                    railItem(.system, icon: "bell", title: "系统", badge: counts[DYNoticeGroup.system.rawValue] ?? 0)
-                    railItem(.stranger, icon: "person.crop.circle.badge.questionmark", title: "陌生人", badge: strangerBadge)
-                    if navigation.isChat { chatMoreRailButton }
-                }
-                .padding(.vertical, 8)
-                .frame(width: Self.railWidth)
-                .glassEffect(.regular, in: .capsule)
+                categoryCapsule
             } else {
-                DYMineShortcuts(vertical: true) { shortcut in
-                    NotificationCenter.default.post(name: .dyOpenMineShortcut, object: shortcut)
-                }
+                DYMineShortcuts(vertical: true) { mineShortcut = $0 }
                 .padding(.top, 8)
                 .frame(width: Self.railWidth, height: 48 * 4 + theme.media.actionItemSpacing * 3 + 16, alignment: .top)
             }
@@ -964,39 +1023,9 @@ struct DYMessagesScreen: View {
 
     private func railButton(icon: String, title: String, selected: Bool, badge: Int, dot: Bool = false, id: String,
                             action: @escaping () -> Void) -> some View {
-        let tint = selected ? theme.accent.color(for: scheme) : Color.primary
-        return Button(action: action) {
-            VStack(spacing: 2) {
-                Image(systemName: selected ? icon + ".fill" : icon)
-                    .font(.system(size: 23, weight: .regular, design: .rounded))
-                    .foregroundStyle(tint)
-                    .frame(width: 34, height: 30)
-                    .overlay(alignment: .topTrailing) {
-                        if badge > 0 {
-                            Text(badge > 99 ? "99+" : String(badge))
-                                .font(.system(size: 9, weight: .bold)).monospacedDigit()
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 4).padding(.vertical, 1.5)
-                                .background(theme.status.danger.color(for: scheme), in: .capsule)
-                                .offset(x: 8, y: -3)
-                        } else if dot {
-                            Circle().fill(theme.status.danger.color(for: scheme))
-                                .frame(width: 8, height: 8)
-                                .offset(x: 2, y: 1)
-                                .accessibilityIdentifier(id + ".dot")
-                        }
-                    }
-                Text(title).font(.caption2.weight(.medium))
-                    .foregroundStyle(selected ? tint : Color.secondary)
-                    .lineLimit(1).minimumScaleFactor(0.7)
-            }
-            .frame(width: Self.railWidth, height: 48)
-            .contentShape(Rectangle())
+        DYInteractionRailButton(title: title, id: id, selected: selected, badge: badge, dot: dot, action: action) {
+            Image(systemName: selected ? icon + ".fill" : icon)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(title)
-        .accessibilityValue(badge > 0 ? "\(badge) 条未读" : (dot ? "有未读" : ""))
-        .accessibilityIdentifier(id)
     }
 
     /// iOS 27.1 以下回退：全屏覆盖（原行为）
@@ -1624,8 +1653,8 @@ struct DYMessagesScreen: View {
     private var isClassicChrome: Bool { chromeModeRaw == DDChromeMode.duoClassic.rawValue }
 
     /// 经典模式：系统竖栏里的分类胶囊（图标+文字，同视频页玻璃胶囊），聊天时多一个「更多」
-    private var classicCategoryCapsule: some View {
-        VStack(spacing: theme.media.actionItemSpacing) {
+    private var categoryCapsule: some View {
+        DYInteractionRail(vertical: true) {
             railItem(.interactive, icon: "heart", title: "互动",
                      badge: (counts[DYNoticeGroup.comment.rawValue] ?? 0) + (counts[DYNoticeGroup.digg.rawValue] ?? 0))
             railItem(.fans, icon: "person", title: "粉丝", badge: counts[DYNoticeGroup.fans.rawValue] ?? 0)
@@ -1633,9 +1662,10 @@ struct DYMessagesScreen: View {
             railItem(.stranger, icon: "person.crop.circle.badge.questionmark", title: "陌生人", badge: strangerBadge)
             if navigation.isChat { chatMoreRailButton }
         }
-        .padding(.vertical, 8)
-        .frame(width: Self.railWidth)
-        .glassEffect(.regular, in: .capsule)
+    }
+
+    private var classicCategoryCapsule: some View {
+        categoryCapsule
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("douyin.messages.rail")
     }

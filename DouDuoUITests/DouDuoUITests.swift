@@ -110,6 +110,14 @@ final class DouDuoUITests: XCTestCase {
         let expandedAccount = account.frame
         let expandedTabs = tabs.frame
         let historyPosition = history.frame
+        if mode == "duoClassic" {
+            let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.53))
+            print("DUODUO_RECORD_START profile-top-limit")
+            start.press(forDuration: 0.2, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 90)),
+                        withVelocity: .slow, thenHoldForDuration: 0.8)
+            print("DUODUO_RECORD_STOP profile-top-limit")
+            XCTAssertEqual(tabs.frame.minY, expandedTabs.minY, accuracy: 1)
+        }
 
         // A short, slow drag should leave both rows at the same intermediate offset.
         let dragStart = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.65))
@@ -133,14 +141,26 @@ final class DouDuoUITests: XCTestCase {
         XCTAssertEqual(tabs.frame.minY, collapsedTabs.minY, accuracy: 2)
         XCTAssertEqual(history.frame.minY, historyPosition.minY, accuracy: 2)
         XCTAssertFalse(bio.exists)
+        XCTAssertFalse(account.label.contains("DouDuo2026"))
+        XCTAssertLessThan(collapsedAccount.minX, expandedAccount.minX - 30)
+        XCTAssertLessThanOrEqual(collapsedTabs.minY - collapsedAccount.maxY, 3)
         attach(app, "mine-\(mode)-collapsed")
 
         history.tap()
         XCTAssertTrue(app.buttons["douyin.mine.history.clear"].waitForExistence(timeout: 8))
+        let back = app.buttons["douyin.mine.shortcut.back"].firstMatch
+        XCTAssertTrue(back.isHittable)
+        if mode == "duoClassic" { attach(app, "mine-history-page") }
+        XCTAssertFalse(tabs.exists && tabs.isHittable)
+        back.tap()
+        XCTAssertTrue(later.waitForExistence(timeout: 8))
+        XCTAssertEqual(tabs.frame.minY, collapsedTabs.minY, accuracy: 2)
         later.tap()
-        let heading = app.staticTexts["douyin.mine.listHeading"].firstMatch
-        XCTAssertTrue(waitUntil(timeout: 8) { heading.exists && heading.label == "稍后再看" })
-        tabs.tap()
+        XCTAssertTrue(back.waitForExistence(timeout: 8))
+        XCTAssertTrue(app.navigationBars["稍后看"].exists)
+        XCTAssertFalse(app.buttons["douyin.mine.history.clear"].exists)
+        back.tap()
+        XCTAssertTrue(tabs.waitForExistence(timeout: 8))
         for _ in 0..<3 where !bio.exists { scroll.swipeDown() }
         XCTAssertTrue(waitUntil(timeout: 6) { abs(account.frame.minY - expandedAccount.minY) < 2 }, mode)
         XCTAssertTrue(bio.exists)
