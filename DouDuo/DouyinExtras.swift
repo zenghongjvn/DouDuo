@@ -1994,6 +1994,7 @@ struct DYMineScreen: View {
                 .background(scheme == .dark ? Color(white: 0.20) : Color(white: 0.84))
                 .clipShape(Circle())
                 .overlay { Circle().strokeBorder(.white.opacity(0.16), lineWidth: 1) }
+                .offset(y: -4)
                 .accessibilityHidden(true)
 
                 Button { showAccounts = true } label: {
